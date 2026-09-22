@@ -90,7 +90,8 @@ with tempfile.TemporaryDirectory() as td:
         assert code == 0
         command = runner.call_args[0][0]
         assert '-b' in command and '-t' in command and 'Debug' in command
-        assert log_path == root / 'build.log'
+        # Hosted Windows TEMP may use RUNNER~1 while the API returns a resolved path.
+        assert log_path == (root / 'build.log').resolve()
 
     # UV4 有时会在日志明确失败时仍返回 0，不得误报成功。
     failed_log = root / 'failed-build.log'
