@@ -341,18 +341,26 @@ def _operation_level():
     return context.level if context else _LOG_LEVEL
 
 
+def _console_write(text):
+    """Best-effort Unicode rendering without changing the caller's encoding."""
+    stream = sys.stdout
+    if stream is None:  # Windowed EXE without a console.
+        return
+    try:
+        stream.write(text)
+    except UnicodeEncodeError:
+        # Imported API callers may have a Western Windows redirected console.
+        # Logging must not abort a file transaction; keep the GUI sink lossless.
+        encoding = getattr(stream, 'encoding', None) or 'utf-8'
+        stream.write(text.encode(encoding, errors='backslashreplace').decode(encoding))
+
+
 def log(msg=''):
     """统一日志出口：CLI 打印到终端，GUI 同时写入日志框。"""
     if (_operation_level() == 'quiet' and
             not str(msg).startswith(('[警告]', '[错误]', '[异常]'))):
         return
-    try:
-        print(msg)
-    except UnicodeEncodeError:
-        # Imported API callers may have a Western Windows redirected console.
-        # Logging must not abort a file transaction; keep the GUI sink lossless.
-        encoding = getattr(sys.stdout, 'encoding', None) or 'utf-8'
-        print(str(msg).encode(encoding, errors='backslashreplace').decode(encoding))
+    _console_write(str(msg) + '\n')
     context = getattr(_OPERATION_LOCAL, 'value', None)
     sink = context.log_sink if context else _LOG_SINK
     if sink is not None:
@@ -562,11 +570,12 @@ def download_file(url, dest, desc='', expected_sha256=None):
                             last = pct
                             set_progress(pct, '正在下载 %s' % desc)
                             if _LOG_LEVEL != 'quiet' and _LOG_SINK is None:
-                                sys.stdout.write('\r  进度: %d%% (%d/%d KB)    ' %
-                                                 (pct, done // 1024, total // 1024))
-                                sys.stdout.flush()
+                                _console_write('\r  进度: %d%% (%d/%d KB)    ' %
+                                               (pct, done // 1024, total // 1024))
+                                if sys.stdout is not None:
+                                    sys.stdout.flush()
                 if total and _LOG_LEVEL != 'quiet' and _LOG_SINK is None:
-                    sys.stdout.write('\n')
+                    _console_write('\n')
             if expected_sha256:
                 actual = sha256_file(part).lower()
                 if actual != expected_sha256:

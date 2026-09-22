@@ -50,6 +50,22 @@ class PortabilityTests(unittest.TestCase):
             m.do_add_files(proj, SimpleNamespace(scan_dirs=str(source.parent), scan_files={alias}, include_h=False), report)
             self.assertIn('new.c', [record['name'] for record in proj.file_records()])
 
+    def test_download_progress_cp1252_and_no_console(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'source.bin'
+            source.write_bytes(b'payload' * 1024)
+            stream = io.BytesIO()
+            output = io.TextIOWrapper(stream, encoding='cp1252', errors='strict')
+            with patch.object(sys, 'stdout', output), patch.object(m, '_LOG_SINK', None):
+                m.download_file(source.as_uri(), Path(folder) / 'copied.bin', '中文')
+            output.flush()
+            self.assertIn(b'100%', stream.getvalue())
+            self.assertEqual((Path(folder) / 'copied.bin').read_bytes(), source.read_bytes())
+            output.detach()
+            with patch.object(sys, 'stdout', None), patch.object(m, '_LOG_SINK', None):
+                m.download_file(source.as_uri(), Path(folder) / 'windowed.bin', '中文')
+            self.assertEqual((Path(folder) / 'windowed.bin').read_bytes(), source.read_bytes())
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
