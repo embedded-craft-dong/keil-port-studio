@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+releases/
+*.spec
+# Raw local hardware evidence contains device identifiers and local paths.
+# Keep it on disk; publish a reviewed summary instead.
+hardware_tests/
+test-results/
+.env
+.env.*
+!.env.example
