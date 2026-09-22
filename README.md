@@ -1,6 +1,6 @@
 # Keil Port Studio
 
-[English](README.en.md) · **2.2.0-rc5 / CubeMX/HAL 工程适配预发布版**
+[English](README.en.md) · **2.2.0-rc6 / CubeMX/HAL 工程适配预发布版**
 
 本版面向 STM32CubeMX 生成的 STM32 HAL + Keil 工程。标准外设库（SPL）及自定义目录工程
 尚未完成自动移植与实板验收；基础文件管理可独立使用，不代表组件自动接入受支持。
@@ -31,7 +31,7 @@ SEGGER RTT、CMSIS-DSP 和外设锁模板。生成框架不等于完成硬件驱
 - [Git 管理与安装](docs/GIT.zh-CN.md)
 - [工具栏测试报告](docs/GUI-TEST-REPORT.zh-CN.md)
 - [发布、构建和验证边界](docs/RELEASE.zh-CN.md)
-- [RC5 更新与已知限制](docs/RELEASE-NOTES-2.2.0-rc5.md)
+- [RC6 更新与已知限制](docs/RELEASE-NOTES-2.2.0-rc6.md)
 - [首次上传 GitHub](docs/PUBLISH.zh-CN.md)
 - [RC2 可靠性加固与实测边界](docs/RELIABILITY.zh-CN.md)
 

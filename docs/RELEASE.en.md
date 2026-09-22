@@ -2,9 +2,9 @@
 
 [简体中文](RELEASE.zh-CN.md)
 
-`2.2.0-rc5` is a CubeMX/HAL adaptation prerelease, not certification of all devices/components.
-RC5 only updates the version and documentation; not all historical hardware combinations were reflashed.
-See [RC5 notes](RELEASE-NOTES-2.2.0-rc5.md) and [scope](SUPPORT.en.md).
+`2.2.0-rc6` is a CubeMX/HAL adaptation prerelease, not certification of all devices/components.
+RC6 fixes console encoding and Windows short-path selection issues found by the first hosted CI run.
+See [RC6 notes](RELEASE-NOTES-2.2.0-rc6.md) and [scope](SUPPORT.en.md).
 The following records describe inherited fixes and historical validation.
 It includes USB Host and RTOS USB startup fixes plus independent Device regression
 completed after RC3 was frozen. Existing RC3 archives were not overwritten and do
@@ -34,8 +34,8 @@ Pinned dependencies do not guarantee byte-for-byte reproducible binaries.
 ```powershell
 py -3.14 -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-build.txt
-.venv\Scripts\python tools\build_release.py releases\2.2.0-rc5
-.venv\Scripts\python tools\verify_release.py releases\2.2.0-rc5
+.venv\Scripts\python tools\build_release.py releases\2.2.0-rc6
+.venv\Scripts\python tools\verify_release.py releases\2.2.0-rc6
 ```
 
 The output directory must not already exist. Outputs:

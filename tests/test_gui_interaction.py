@@ -108,7 +108,10 @@ class GuiTests(unittest.TestCase):
 
     def test_settings_can_scroll_to_last_options(self):
         g=self.gui;g.nav_buttons[5].invoke();g.root.update()
-        self.assertLess(g.settings_canvas.yview()[1],1)
+        if g.settings_body.winfo_reqheight() > g.settings_canvas.winfo_height():
+            self.assertLess(g.settings_canvas.yview()[1],1)
+        else:
+            self.assertEqual(g.settings_canvas.yview(), (0.0, 1.0))
         g.settings_canvas.yview_moveto(1);g.root.update()
         options=[w for w in children(g.settings_body) if isinstance(w,m.ttk.Checkbutton)]
         last=options[-1]
@@ -118,6 +121,13 @@ class GuiTests(unittest.TestCase):
 
     def test_scaled_layouts(self):
         for scale in (1.25,1.5):
+            with self.subTest(display_scale=scale):
+                if (self.gui.root.winfo_screenwidth() < round(980*scale)+60 or
+                        self.gui.root.winfo_screenheight() < round(650*scale)+90):
+                    self.skipTest('Physical display too small for the requested DPI layout; validate on a larger desktop')
+                self._check_scaled_layout(scale)
+
+    def _check_scaled_layout(self, scale):
             self.gui._close()
             with patch.object(m,'_find_projects',return_value=[]):
                 self.gui=m.KeilPortGUI(scaling=(96/72)*scale)

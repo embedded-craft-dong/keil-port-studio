@@ -2,8 +2,8 @@
 
 [English](RELEASE.en.md)
 
-当前版本 `2.2.0-rc5` 是 CubeMX/HAL 适配预发布版，不宣称所有组件/芯片/组合已验证。
-RC5 仅更新版本与发布文档，未重新烧录全部历史硬件组合；见[RC5 说明](RELEASE-NOTES-2.2.0-rc5.md)
+当前版本 `2.2.0-rc6` 是 CubeMX/HAL 适配预发布版，不宣称所有组件/芯片/组合已验证。
+RC6 修复首次云端 CI 暴露的控制台编码与 Windows 短路径选择问题；见[RC6 说明](RELEASE-NOTES-2.2.0-rc6.md)
 和[适配范围](SUPPORT.zh-CN.md)。以下为继承的功能修复与历史验证记录。
 本版包含 RC3 冻结后完成的 USB Host、RTOS USB 启动修复及独立 Device 回归；
 旧 RC3 压缩包未被覆盖，不包含这些后续修复。完整变更与限制见
@@ -30,8 +30,8 @@ Python 3.8+ 与打包依赖所需 Python 版本不是同一概念。打包器版
 ```powershell
 py -3.14 -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-build.txt
-.venv\Scripts\python tools\build_release.py releases\2.2.0-rc5
-.venv\Scripts\python tools\verify_release.py releases\2.2.0-rc5
+.venv\Scripts\python tools\build_release.py releases\2.2.0-rc6
+.venv\Scripts\python tools\verify_release.py releases\2.2.0-rc6
 ```
 
 输出目录必须不存在，以免覆盖以前的发布。生成：

@@ -2,7 +2,7 @@
 
 [简体中文](PUBLISH.zh-CN.md)
 
-Start with a `v2.2.0-rc5` CubeMX/HAL adaptation prerelease: keep source in Git and portable ZIPs in Releases.
+Start with a `v2.2.0-rc6` CubeMX/HAL adaptation prerelease: keep source in Git and portable ZIPs in Releases.
 Do not upload the entire local workspace, vendor SDKs or raw `hardware_tests/` evidence.
 
 ## Before uploading
@@ -12,7 +12,7 @@ Confirm account, repository name, visibility and MIT attribution (currently
 regression suite, and manually review staged files and history; the scanner is not
 a complete secret detector. Check whether commit author/email metadata may be public.
 Using a GitHub noreply address does not rewrite older commits automatically.
-Keep failed and unverified items in the [RC5 notes](RELEASE-NOTES-2.2.0-rc5.md) and [scope](SUPPORT.en.md).
+Keep failed and unverified items in the [RC6 notes](RELEASE-NOTES-2.2.0-rc6.md) and [scope](SUPPORT.en.md).
 Use the [build guide](RELEASE.en.md); rebuild whenever reviewed source changes.
 
 ## Publish source
@@ -30,9 +30,9 @@ Exclude releases/build caches, local logs/settings, virtual environments, secret
 
 ## Draft a prerelease
 
-In Releases, create a draft for `v2.2.0-rc5` targeting the commit matching the built
-source. Suggested title: `Keil Port Studio 2.2.0-rc5 — CubeMX/HAL`.
-Use the RC5 notes, mark it as a prerelease and attach these from one build:
+In Releases, create a draft for `v2.2.0-rc6` targeting the commit matching the built
+source. Suggested title: `Keil Port Studio 2.2.0-rc6 — CubeMX/HAL`.
+Use the RC6 notes, mark it as a prerelease and attach these from one build:
 
 - `KeilPortStudio-Windows-x64.zip`
 - `KeilPortStudio-source.zip`

@@ -150,7 +150,7 @@ LWIP_TAG = 'STABLE-2_2_1_RELEASE'
 TINYUSB_TAG = '0.21.0'
 TINYUSB_AC5_TAG = '0.17.0'       # ARM Compiler 5 使用较保守且已验证广泛的版本
 TINYUSB_AC5_HOST_TAG = '0.18.0'  # DWC2 Host requires hcd_dwc2.c plus scoped AC5 fixes
-TOOL_VERSION = '2.2.0-rc5'
+TOOL_VERSION = '2.2.0-rc6'
 RTTHREAD_TAG = 'v5.2.2'
 RTTHREAD_SHA256 = 'c40bd84ee10389988d10cb64dda0ed63d8df719a6a2065cbc1c49bebac4f45b0'
 CMSIS_OS2_H_URL = ('https://raw.githubusercontent.com/ARM-software/CMSIS_5/5.9.0/'
@@ -346,7 +346,13 @@ def log(msg=''):
     if (_operation_level() == 'quiet' and
             not str(msg).startswith(('[警告]', '[错误]', '[异常]'))):
         return
-    print(msg)
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        # Imported API callers may have a Western Windows redirected console.
+        # Logging must not abort a file transaction; keep the GUI sink lossless.
+        encoding = getattr(sys.stdout, 'encoding', None) or 'utf-8'
+        print(str(msg).encode(encoding, errors='backslashreplace').decode(encoding))
     context = getattr(_OPERATION_LOCAL, 'value', None)
     sink = context.log_sink if context else _LOG_SINK
     if sink is not None:
@@ -2036,7 +2042,9 @@ def do_add_files(proj, opts, rep):
 
     selected = getattr(opts, 'scan_files', None)
     if selected is not None:
-        selected = {os.path.normcase(os.path.normpath(str(x))) for x in selected}
+        # Normalize Windows 8.3 aliases as well as case/separators. scan dirs
+        # are resolved above, while selections can still contain RUNNER~1.
+        selected = {os.path.normcase(str(Path(x).resolve())) for x in selected}
     existing = {proj.norm_file(fp) for fp in proj.files_in_project()}
     inc_dirs = proj.include_dirs_abs()
     inc_dirs.add(os.path.normcase(str(proj.dir)))
@@ -2046,7 +2054,7 @@ def do_add_files(proj, opts, rep):
     for d in dirs:
         for f in iter_scan_files(d, foreign_roots, output_roots, managed_roots):
             suf = f.suffix.lower()
-            if selected is not None and os.path.normcase(os.path.normpath(str(f))) not in selected:
+            if selected is not None and os.path.normcase(str(f.resolve())) not in selected:
                 continue
             try:
                 rel = f.relative_to(d)

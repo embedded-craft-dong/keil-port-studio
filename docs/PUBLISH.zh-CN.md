@@ -2,7 +2,7 @@
 
 [English](PUBLISH.en.md)
 
-建议先发布 `v2.2.0-rc5` CubeMX/HAL 适配预发布版：源码进仓库，完整便携 ZIP 进 Releases。
+建议先发布 `v2.2.0-rc6` CubeMX/HAL 适配预发布版：源码进仓库，完整便携 ZIP 进 Releases。
 不要上传整个本地工作目录，更不要上传原始实板工程、SDK 或 `hardware_tests/`。
 
 ## 1. 上传前
@@ -10,7 +10,7 @@
 - 确认 GitHub 账号、仓库名、公开可见性和 MIT 署名。当前署名是 `Keil Port Studio contributors`。
 - 运行 `python tools/audit_publication.py` 和回归测试；检查待提交内容和历史，扫描器不是完整泄密检测。
 - 如公开已有历史，检查 Git 提交作者/邮箱是否愿意公开；使用 GitHub 提供的 noreply 邮箱也不会自动修改旧历史。
-- 阅读[RC5 发布说明](RELEASE-NOTES-2.2.0-rc5.md)和[适配范围](SUPPORT.zh-CN.md)，保留失败与未验证项，不能把未通过改成未测试。
+- 阅读[RC6 发布说明](RELEASE-NOTES-2.2.0-rc6.md)和[适配范围](SUPPORT.zh-CN.md)，保留失败与未验证项，不能把未通过改成未测试。
 - 构建及校验方法见[发布指南](RELEASE.zh-CN.md)。旧包保留，源码改变后必须重新构建。
 
 ## 2. 发布源码
@@ -27,9 +27,9 @@ Git 登录由用户在可信的 Git/GitHub 认证流程中完成，不能把 tok
 
 ## 3. 建立预发布版
 
-打开仓库的 Releases，创建草稿；标签用 `v2.2.0-rc5`，Target 选择与构建源码一致的提交。
-标题建议为 `Keil Port Studio 2.2.0-rc5 — CubeMX/HAL`。
-正文使用 RC5 发布说明，勾选 pre-release，附加以下同一次构建的文件并最终确认发布：
+打开仓库的 Releases，创建草稿；标签用 `v2.2.0-rc6`，Target 选择与构建源码一致的提交。
+标题建议为 `Keil Port Studio 2.2.0-rc6 — CubeMX/HAL`。
+正文使用 RC6 发布说明，勾选 pre-release，附加以下同一次构建的文件并最终确认发布：
 
 - `KeilPortStudio-Windows-x64.zip`
 - `KeilPortStudio-source.zip`
