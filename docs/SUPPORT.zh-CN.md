@@ -32,7 +32,7 @@
 
 - 标准库工程不是“不能运行这些中间件”，而是本工具的完整自动接入尚未验证；不要用添加标记代替适配。
 - 测试板 USB3 VBUS 软件关断实测未通过，原因未定位；普通 U 盘读写与实际断电保留是另外的已通过项目。
-- 无 Python/Git 的干净 Windows 验收未完成；EXE 未签名；GitHub Actions 需上传后实际运行。
+- 无 Python/Git 的干净 Windows 验收未完成；EXE 未签名。自动化检查见 [RC6 CI 记录](https://github.com/embedded-craft-dong/keil-port-studio/actions/runs/35721027566)，不替代上述验收。
 - 中间件离线包尚未随本版提供；程序包与源码包不包含完整第三方 SDK。可按组件选择完整本地 SDK，
   缺少依赖时自动准备可能联网。不能把程序内“离线指南”理解为所有移植流程完全离线。
 

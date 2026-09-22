@@ -29,11 +29,7 @@ SEGGER RTT、CMSIS-DSP 和外设锁模板。生成框架不等于完成硬件驱
 - [图形界面教程](docs/GUI.zh-CN.md)
 - [每种组件移植后还需要做什么](docs/POST-PORTING.zh-CN.md)
 - [Git 管理与安装](docs/GIT.zh-CN.md)
-- [工具栏测试报告](docs/GUI-TEST-REPORT.zh-CN.md)
-- [发布、构建和验证边界](docs/RELEASE.zh-CN.md)
 - [RC6 更新与已知限制](docs/RELEASE-NOTES-2.2.0-rc6.md)
-- [首次上传 GitHub](docs/PUBLISH.zh-CN.md)
-- [RC2 可靠性加固与实测边界](docs/RELIABILITY.zh-CN.md)
 
 ## 重要边界
 
@@ -52,9 +48,14 @@ Windows 包未签名：校验 SHA256，按组织安全规则使用，不要关�
 
 运行 `python tests/test_git_panel.py` 等 `tests/test_*.py`。Tk 测试需要图形桌面，
 Git 测试需要 Git；真实 Keil 编译用环境变量显式启用，详见测试报告。
-Windows 打包步骤见发布文档。GitHub Actions 配置已提供，但本地运行不代表云端 CI 已通过。
+
+- [Windows 构建与验证](docs/RELEASE.zh-CN.md)
+- [工具栏测试报告](docs/GUI-TEST-REPORT.zh-CN.md)
+- [可靠性加固与历史验证](docs/RELIABILITY.zh-CN.md)
+- [RC6 云端 CI 记录](https://github.com/embedded-craft-dong/keil-port-studio/actions/runs/35721027566)
+
+CI 不替代实板验证或无 Python/Git 的干净 Windows 验收。
 
 工具代码采用 [MIT](LICENSE)，允许自由使用、修改和再分发，保留版权与许可声明。
 第三方中间件及运行库保持各自许可证，参见 [第三方说明](THIRD-PARTY-NOTICES.md)。
-建议将源码提交 GitHub，将 EXE ZIP 放在 Releases；不要只开源 EXE。
 参与改进、报告问题和提交硬件验证记录请见 [贡献指南](CONTRIBUTING.md)。

@@ -36,7 +36,7 @@ for exact evidence; the main hardware target is STM32F407.
   Adding markers alone is not sufficient adaptation.
 - Software-controlled USB3 VBUS shutoff failed on the test board, with unresolved cause. Passing thumb-drive
   I/O and actual power-loss retention are separate results.
-- Clean Windows without Python/Git remains untested; the EXE is unsigned; hosted CI must actually run after upload.
+- Clean Windows without Python/Git remains untested; the EXE is unsigned. See the [RC6 CI record](https://github.com/embedded-craft-dong/keil-port-studio/actions/runs/35721027566) for automated checks, which do not replace that acceptance test.
 - No complete middleware offline bundle is included. Select complete local SDKs per component;
   missing dependencies may trigger network preparation. Offline guides do not mean all migration is offline.
 

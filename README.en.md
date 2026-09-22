@@ -34,11 +34,7 @@ is not a completed hardware driver.
 - [GUI tutorial](docs/GUI.en.md)
 - [Required work after porting each component](docs/POST-PORTING.en.md)
 - [Git workflow and installation](docs/GIT.en.md)
-- [Toolbar testing report](docs/GUI-TEST-REPORT.en.md)
-- [RC2 reliability changes and hardware limits](docs/RELIABILITY.en.md)
-- [Build, release and verification boundaries](docs/RELEASE.en.md)
 - [RC6 changes and known limitations](docs/RELEASE-NOTES-2.2.0-rc6.md)
-- [First GitHub publication](docs/PUBLISH.en.md)
 
 ## Important limitations
 
@@ -62,10 +58,14 @@ do not disable protection to run them.
 
 Run the `tests/test_*.py` scripts. Tk tests require a desktop; Git integration tests
 require Git. Real Keil builds are explicitly enabled by environment variables (see report).
-Build instructions are in the release guide. The supplied GitHub Actions workflow
-has not been certified by a local test run.
+
+- [Windows build and verification](docs/RELEASE.en.md)
+- [Toolbar testing report](docs/GUI-TEST-REPORT.en.md)
+- [Reliability changes and historical validation](docs/RELIABILITY.en.md)
+- [RC6 hosted CI record](https://github.com/embedded-craft-dong/keil-port-studio/actions/runs/35721027566)
+
+CI does not replace hardware testing or clean Windows acceptance without Python/Git.
 
 The tool uses [MIT](LICENSE): use, modify and redistribute with its copyright/license notice.
 Middleware and bundled runtimes retain their own terms: [third-party notices](THIRD-PARTY-NOTICES.md).
-Publish source in GitHub and binary ZIPs in Releases, rather than distributing only an EXE.
 See [Contributing](CONTRIBUTING.md) for fixes, bug reports and hardware evidence.

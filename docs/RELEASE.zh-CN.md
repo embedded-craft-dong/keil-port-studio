@@ -1,25 +1,12 @@
-# 发布候选版与构建
+# Windows 构建与验证
 
 [English](RELEASE.en.md)
 
 当前版本 `2.2.0-rc6` 是 CubeMX/HAL 适配预发布版，不宣称所有组件/芯片/组合已验证。
 RC6 修复首次云端 CI 暴露的控制台编码与 Windows 短路径选择问题；见[RC6 说明](RELEASE-NOTES-2.2.0-rc6.md)
-和[适配范围](SUPPORT.zh-CN.md)。以下为继承的功能修复与历史验证记录。
-本版包含 RC3 冻结后完成的 USB Host、RTOS USB 启动修复及独立 Device 回归；
-旧 RC3 压缩包未被覆盖，不包含这些后续修复。完整变更与限制见
-[RC4 发布说明](RELEASE-NOTES-2.2.0-rc4.md)。
-本轮加固启动补丁、源码卸载归属、XML 写入自检与后台任务，并开始拆出纯核心模块。
-新生成 FreeRTOS/CMSIS-V2 与 RT-Thread 内核均已烧录、校验、复位实测；
-具体范围见[可靠性说明](RELIABILITY.zh-CN.md)。既有硬件证据另包含特定存储、USB、网络、显示测试，
-其中本轮显示画面已由用户确认；新增存储/USB/网络最终断言配置复测见
-[硬件验证矩阵](HARDWARE-MATRIX.zh-CN.md)。
-不要将旧配置的测试结果当作所有发布配置的认证。
-
-另修复 TinyUSB/LwIP FreeRTOS 初始化中的断言副作用：任务创建不再藏在
-`configASSERT` 中。以宿主机 API 替身做了开/关断言的 C 编译运行验证，并以这次
-模板修正重新生成、烧录 USB/网络测试并通过本板所列项目。此处结果只覆盖已列配置，
-USB Host 的裸机/FreeRTOS/RT-Thread U 盘文件读写与断电保留已有实测；
-本板 VBUS 软件关断未通过且停止元件级排查，不能将其他 MCU 或外围组合推断为通过。
+和[适配范围](SUPPORT.zh-CN.md)。历史修复见[可靠性说明](RELIABILITY.zh-CN.md)
+与[RC4 发布说明](RELEASE-NOTES-2.2.0-rc4.md)；具体实板结果见
+[硬件验证矩阵](HARDWARE-MATRIX.zh-CN.md)。本页供需要自行构建或维护项目的开发者使用。
 
 ## 构建 Windows 包
 
@@ -41,21 +28,22 @@ py -3.14 -m venv .venv
 - `KeilPortStudio-source.zip`（白名单源码、测试、文档、构建脚本）；
 - `SHA256SUMS.txt` 和程序内 `BUILD-INFO.json`。
 
-源码包不包括原始硬件档案、用户名路径、测试工程、SDK、私有凭据和构建缓存。
-`hardware_tests/` 的本地原始证据保留在磁盘，但通过 `.gitignore` 排除。
+源码包使用白名单收集文件，不包含原始硬件档案、测试工程、SDK 和构建缓存。
+白名单与自动扫描不能保证内容不存在隐私或凭据，仍需审查实际打包内容。
 发布前仍须人工检查 Git 暂存区；ignore 不会移除以前已经跟踪的文件。
 
 便携包没有签名/安装器，不要求管理员权限。Git 是可选外部程序，不打入 EXE。
 桌面程序的诊断日志保存在 `%APPDATA%/KeilPortStudio/logs`，会包含工程路径和输出；
 分享日志前脱敏，并按需清理。项目事务备份不等于 MCU Flash/SD 数据备份。
 
-## 上传 GitHub 前清单
+## 验证要求
 
-1. 阅读 MIT，确认公开仓库名称、作者/版权署名、第三方来源；不要把第三方代码改标 MIT。
-2. 运行全部测试，验证 ZIP 解压后的 EXE。无 Python/Git 的干净 Windows 验收仍待有条件的贡献者完成，不能以修改 PATH 冒充；本候选版须披露此限制。
-3. 审查提交差异、密钥、真实设备标识和大文件，确认只公开计划公开的文件。
-4. 源码进入仓库；EXE ZIP、源码 ZIP、校验值放 GitHub Releases。建议先标记 prerelease。
-5. 发布说明列出已测与未测内容。首次 GitHub 登录、创建仓库/公开发布由用户确认。
+1. 运行 `python tools/audit_publication.py`，检查白名单内容、常见隐私模式及文档链接；人工复核提交差异与压缩包。
+2. 运行 `tests/test_*.py` 回归脚本。Tk 测试需要图形桌面，Git 测试需要 Git；真实 Keil 编译需显式启用。
+3. 用 `verify_release.py` 校验构建产物，并实际解压启动 EXE，检查文件添加、预览、导出和恢复。
+4. 保留第三方许可证，记录构建环境、源码版本、校验值和测试范围；不要将第三方代码改标 MIT。
 
-目前提供构建与 CI 配置，不自动创建仓库、提交、推送或发布。
-首次公开的具体步骤见[上传指南](PUBLISH.zh-CN.md)。
+[RC6 云端 CI 记录](https://github.com/embedded-craft-dong/keil-port-studio/actions/runs/35721027566)
+覆盖自动化回归，不替代硬件与干净环境验收。无 Python/Git 的干净 Windows 验收仍未完成，
+仅修改 PATH 不能代替。测试板 USB Host VBUS 软件关断实测未通过；
+普通 U 盘读写及实际断电保留通过是独立结论。不得据此宣称所有硬件组合通过。

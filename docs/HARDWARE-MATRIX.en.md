@@ -8,7 +8,7 @@ UART2 uses a wireless serial bridge. Every programming operation was verified an
 followed by reset. User baseline projects were preserved. Board adapters are explicit,
 not inferred wiring or universal generated drivers.
 
-## September 22 USB Host addendum (unreleased working-tree fixes, not frozen RC3)
+## September 22 USB Host validation addendum (included from RC4, absent from frozen RC3)
 
 USB3 hosts a real 16,122,970,112-byte FAT32 thumb drive with 512-byte sectors.
 USB2 is the sole power source; USB1 remains empty. Tests create dedicated new
