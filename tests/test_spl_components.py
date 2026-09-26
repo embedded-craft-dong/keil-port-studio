@@ -215,7 +215,7 @@ class SPLEntryTests(unittest.TestCase):
             p._planned_generated_files = {os.path.normcase(str(app.resolve())): m.freertos_app_templates(False)[1]}
             rep = m.Report('fatfs')
             m._plan_spl_component_entry(p, rep, 'fatfs.h', 'MX_FATFS_Init();')
-            self.assertEqual(rep.gen_files[0][0], app)
+            self.assertEqual(rep.gen_files[0][0], app.resolve())
             self.assertIn('KPS SPL COMPONENT MX_FATFS_Init INIT', rep.gen_files[0][1])
             with self.assertRaises(m.ToolError):
                 m._plan_spl_component_entry(p, rep, 'usb.h', 'Usb_Init();', 'Usb_Poll();')
