@@ -246,7 +246,7 @@ class RecoveryTests(unittest.TestCase):
             sdk = root / 'SDK'; sdk.mkdir(); (sdk / 'tasks.c').write_text('x')
             rep = m.Report('freertos')
             _, local = m.plan_project_library_copy(p, sdk, 'FreeRTOS', lambda path:path if (path / 'tasks.c').is_file() else None, rep)
-            self.assertEqual(local, root / 'KPS/ThirdParty/FreeRTOS')
+            self.assertEqual(local, (root / 'KPS/ThirdParty/FreeRTOS').resolve())
             self.assertFalse(local.exists())
 
     def test_cli_recovery_cannot_mix_install_or_doctor(self):
@@ -264,7 +264,7 @@ class RecoveryTests(unittest.TestCase):
             p.add_file('FreeRTOS/Application', app.name, 1, '../KPS/FreeRTOS/App/freertos_app.c')
             rep = m.Report('rtos_guard')
             m.do_rtos_guard(p, SimpleNamespace(guard_resources=['UART']), rep)
-            edits = [text for path, text, _ in rep.gen_files if path == app]
+            edits = [text for path, text, _ in rep.gen_files if path.resolve() == app.resolve()]
             self.assertEqual(len(edits), 1)
             self.assertIn('RTOS_PeripheralGuard_Init();', edits[0])
 
@@ -306,7 +306,7 @@ class RecoveryTests(unittest.TestCase):
             for task, call in [('lwip', 'LwIP_AppInit();'), ('tinyusb', 'TinyUSB_AppInit();')]:
                 rep = m.Report(task)
                 m.TASK_FUNCS[task](p, opts, rep)
-                changes = [text for path, text, _ in rep.gen_files if path == app]
+                changes = [text for path, text, _ in rep.gen_files if path.resolve() == app.resolve()]
                 self.assertEqual(len(changes), 1, task)
                 self.assertIn(call, changes[0])
                 self.assertTrue(any('KPS/ThirdParty' in str(dst).replace('\\', '/') for _, dst, _ in rep.copy_trees))

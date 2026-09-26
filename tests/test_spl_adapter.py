@@ -76,7 +76,7 @@ class SPLTests(unittest.TestCase):
             root = Path(td)
             p = project(root)
             self.assertEqual(m.project_profile(p), 'stm32-spl')
-            self.assertEqual(m.discover_entry(p, m.read_source_text)[0], root / 'User/entry.c')
+            self.assertEqual(m.discover_entry(p, m.read_source_text)[0], (root / 'User/entry.c').resolve())
             (root / 'backup.c').write_text(MAIN)
             self.assertEqual(len(list(active_sources(p))), 2)
             p.add_file('App', 'backup.c', 1, 'backup.c')
@@ -108,7 +108,7 @@ class SPLTests(unittest.TestCase):
             path.write_bytes(original)
             report = m.Report('freertos')
             m.add_freertos_application(p, True, report)
-            patched = next(value for file, value, _ in report.gen_files if file == path)
+            patched = next(value for file, value, _ in report.gen_files if file.resolve() == path.resolve())
             self.assertIn('用户标准库', m.encode_preserving_format(path, patched).decode('gbk'))
             self.assertEqual(path.read_bytes(), original)  # planning only
             self.assertTrue(any('while(1)' in w for w in report.warnings))

@@ -163,14 +163,15 @@ typedef void *osMutexId_t; typedef int32_t osStatus_t;
 static inline osMutexId_t osMutexNew(const void *a) {(void)a; return (void*)1;}
 static inline osStatus_t osMutexAcquire(osMutexId_t m,uint32_t t){(void)m;(void)t;return osOK;}
 static inline osStatus_t osMutexRelease(osMutexId_t m){(void)m;return osOK;}
+static inline uint32_t osKernelGetTickFreq(void){return 1000U;}
 ''')
         include_args = ['-I', str(stubs), '-I', str(project_root / 'Core' / 'Inc')]
-        subprocess.run([gcc, '-std=c99', '-DLFS_THREADSAFE', '-fsyntax-only',
+        subprocess.run([gcc, '-std=c99', '-Werror=implicit-function-declaration', '-DLFS_THREADSAFE', '-fsyntax-only',
                         str(project_root / 'Core' / 'Src' / 'littlefs_port.c')] + include_args,
-                       check=True, capture_output=True, text=True)
-        subprocess.run([gcc, '-std=c99', '-fsyntax-only',
+                       check=True)
+        subprocess.run([gcc, '-std=c99', '-Werror=implicit-function-declaration', '-fsyntax-only',
                         str(project_root / 'Core' / 'Src' / 'rtos_peripheral_guard.c')] +
-                       include_args, check=True, capture_output=True, text=True)
+                       include_args, check=True)
 
     uninstall_proj = m.KeilProject(project)
     assert m.uninstall_component(uninstall_proj, 'rtos_guard', yes=True)
