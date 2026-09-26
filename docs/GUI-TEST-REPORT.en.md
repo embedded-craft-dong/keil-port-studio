@@ -61,6 +61,21 @@ official-site fallback are mocked, while the actual Windows installer remains un
 
 ## Reproduce
 
+September 26 development-source addendum: actual mouse use exposed an unresponsive
+Close button in the packaged Doctor report opened from Project tools. Tk's input
+grab remained with the parent. The report now takes the grab and returns it to
+the surviving parent on close. A regression first reproduced the failure, then
+checked button/title-bar close and Chinese/English entry paths. All 29 test
+scripts passed, including the explicitly enabled real Keil fixture build. This
+does not replace actual clicks on a rebuilt EXE or clean-Windows acceptance.
+
+Subsequent actual mouse checks on local B05 passed: closing the Doctor report
+restored the parent, language switching worked, scanning selected 111 files and
+unchecking one showed 110 with partial parent selection, and safety/log windows
+opened and closed. Extracted-package CLI add/export/exact rollback, CubeMX recovery
+and SPL install checks passed. No GitHub publication or Python/Git-free clean
+Windows acceptance is claimed.
+
 ```powershell
 python tests/test_gui_actions.py
 python tests/test_git_panel.py

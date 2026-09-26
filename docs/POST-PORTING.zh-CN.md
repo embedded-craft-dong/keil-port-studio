@@ -2,8 +2,8 @@
 
 [English](POST-PORTING.en.md) · [界面操作](GUI.zh-CN.md)
 
-**适配范围：CubeMX/HAL 工程。** 标准库（SPL）及自定义入口尚未完成自动移植验收，
-见[适配范围](SUPPORT.zh-CN.md)。下文提到的目录回退机制不代表标准库完整支持。
+**本指南主要针对 CubeMX/HAL 工程。** 开发版 SPL 的 RTOS 与 FatFS/LwIP/TinyUSB 接入及
+实测边界见[标准库指南](SPL.zh-CN.md)，不代表所有 SPL 组件组合均已支持。
 
 本工具复制中间件、配置 Keil 引用并生成接入骨架，**不能通过芯片型号推导出你的
 屏幕、存储芯片、PHY、电源连接或中断优先级设计**。编译通过只是第一关。
@@ -27,7 +27,7 @@
 
 | 组件 | 主要填写位置 | 首个验收目标 |
 | --- | --- | --- |
-| FreeRTOS | `Core/Src/freertos_app.c`、有效 `FreeRTOSConfig.h` | 两个任务持续运行，时间与墙钟一致 |
+| FreeRTOS | 新 CubeMX 安装：`KPS/FreeRTOS/App/freertos_app.c`；旧版可能在 `Core/Src`，另查有效 `FreeRTOSConfig.h` | 两个任务持续运行，时间与墙钟一致 |
 | RT-Thread | `RTThread/App/rtthread_app.c`、`RTThread/Config/rtconfig.h` | 心跳、线程切换、IPC、栈余量 |
 | LVGL | `<MDK目录>/LVGL/porting/lv_port_*_template.*`、库同级 `lv_conf.h` | 文字/RGB/边框/动画均正确 |
 | FatFS | `FatFs/Target/user_diskio.c`、`FatFs/App/fatfs.c`、有效 `ffconf.h` | 写入、关闭、复位后读回比对 |
@@ -42,6 +42,9 @@
 不要通过删除自己写好的驱动来“消除提示”。
 
 ## FreeRTOS / CMSIS-RTOS2
+
+再次生成 CubeMX 前请阅读[共存与恢复指南](CUBEMX.zh-CN.md)。新库副本在
+`KPS/ThirdParty`；旧版在 `Middlewares/Third_Party` 的副本应先隔离，避免被 CubeMX 清理。
 
 - 在 `MX_FREERTOS_Init()` 的 `RTOS_MUTEX`、`RTOS_SEMAPHORES`、`RTOS_TIMERS`、
   `RTOS_THREADS` 区创建资源和任务；业务写入 `StartDefaultTask()` 或自己的任务函数。
@@ -145,15 +148,24 @@ SMP 或 TrustZone 工程。不能与 FreeRTOS 同选。
   Send 返回成功前必须已复制数据或完成发送，模板会复用 TX 缓冲区。
 - STM32 ETH：核对 RMII/MII、50 MHz 参考时钟、PHY 地址与复位、MDIO/MDC、DMA 描述符和
   缓冲区；有 DCache 的芯片另做缓存一致性。W5500 模板走 MACRAW，不是硬件 TCP socket API。
+- PHY 显示 Link 不代表能收包。MAC 必须接收 ARP 广播，部分 SPL 驱动默认禁止广播；
+  核对广播过滤与软/硬件校验和配置，不能仅凭网口灯亮判成功。F407 的 PA2 可同时用于
+  UART2_TX 与 ETH_MDIO，使用网口时不可继续用该引脚输出串口日志。
 - 在 `LwIP_AddNetif()` 与 `lwipopts.h` 选择 DHCP 或静态 IP。直连电脑没有 DHCP 服务时，
   手工设置双方不同但同网段的地址；无线校园网不等于有线侧有 DHCP。不要未经允许改防火墙。
 - 裸机持续调用 `LwIP_Poll()` 处理收包与超时；RTOS 核对自动创建的处理任务和 TCP/IP 线程。
   RAW API 要在正确的 TCP/IP 上下文中使用。补齐运行中 PHY 断连/重连的 link 状态通知。
+- 自己实现 TCP RAW 回调时，不能假设一次收到的 `pbuf` 总能一次 `tcp_write()` 完。
+  按 `tcp_sndbuf()` 分段发送，资源不足时保留未发送数据并在 sent/poll 回调续传；
+  正确处理 pbuf 所有权、接收窗口归还、关闭和错误清理。小包回显通过不等于突发并发通过。
 - HTTP、MQTT 等源文件被选中不代表服务/客户端已启动；还要配置资源、回调、服务器地址、
   端口和连接逻辑。模板没有自动提供 TLS、证书或公网可达性。
 - 验收：PHY ID/Link → ARP/Ping → UDP/TCP 带序号及长度的内容比对 → 断线恢复 → 压力测试。
 
 ## TinyUSB
+
+- RT-Thread 的实际 USB 中断入口/出口应成对调用 `rt_interrupt_enter()` / `rt_interrupt_leave()`，
+  中间转发 TinyUSB 中断；若 BSP 已经包装则不要重复登记。工具不猜测或覆盖现有 IRQ。
 
 - FreeRTOS 的 USB IRQ 优先级须根据本工程 `configMAX_SYSCALL_INTERRUPT_PRIORITY`
   和 `__NVIC_PRIO_BITS` 换算为 HAL/NVIC 使用的未移位值，不能假定 5 或 6 一定合法。
@@ -199,6 +211,14 @@ SMP 或 TrustZone 工程。不能与 FreeRTOS 同选。
 `RTOS_PeripheralGuard_Lock/Unlock`，检查返回值，所有退出路径都释放。初始化只做一次。
 锁是按资源类别生成的，不自动绑定 HAL 句柄，也不会自动包裹已有调用。
 DMA 异步事务必须保护到真正完成，不能启动后立即释放；ISR 不获取阻塞互斥锁。
+开发版新模板的 `timeout_ms` 按毫秒换算：0 表示立即尝试，`UINT32_MAX` 请求无限等待；
+有限值向上取整为 tick，过大时饱和到内核可表达的有限值，仍受 tick 相位影响。
+原生 FreeRTOS 的无限等待还要求 `INCLUDE_vTaskSuspend=1`，否则 `portMAX_DELAY` 是有限等待。
+旧模板文件不会因重新运行而强制覆盖；升级时备份并合并新生成的 `Lock` 函数，保留自己的驱动接入。
+联合测试还要记录等待锁和持锁的最长时间。高优先级 GUI 长时间占用 CPU 可能使较低
+优先级持锁线程无法及时释放锁；互斥锁的优先级继承不等于自动解决所有调度问题。
+按业务截止时间安排优先级、限定渲染/驱动工作量，并验证实际编译优化等级。
+不要仅增大超时或关闭断言来掩盖故障；工具不能替业务自动决定各线程优先级。
 
 ## 联合测试顺序
 

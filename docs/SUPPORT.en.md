@@ -2,6 +2,11 @@
 
 [简体中文](SUPPORT.zh-CN.md)
 
+Development addition: `2.3.0-dev1` source includes the initial
+[STM32 SPL FreeRTOS/CMSIS-V2/RT-Thread adapters](SPL.en.md), independently run on F407/AC5.
+These adapters also ship in the matching Windows prerelease. The table below preserves
+RC6 baseline boundaries; use the dedicated guides for newly added capabilities.
+
 ## Intended projects
 
 This release primarily targets STM32 HAL + Keil MDK `.uvprojx/.uvproj` projects generated

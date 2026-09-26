@@ -2,6 +2,9 @@
 
 [English](SUPPORT.en.md)
 
+开发版补充：`2.3.0-dev1` 源码新增 [STM32 SPL FreeRTOS/CMSIS-V2/RT-Thread 首批适配](SPL.zh-CN.md)，
+已在 F407/AC5 做独立运行测试，并随同版本 Windows 预发布包提供。下表保留 RC6 的基础边界；新增功能以专项指南为准。
+
 ## 这版适合谁
 
 本版主要面向 STM32CubeMX 生成的 STM32 HAL + Keil MDK `.uvprojx/.uvproj` 工程。

@@ -2,7 +2,8 @@
 
 [简体中文](RELEASE.zh-CN.md)
 
-`2.2.0-rc6` is a CubeMX/HAL adaptation prerelease, not certification of all devices/components.
+The `2.3.0-dev1` prerelease provides source and Windows packages, adding health checks, CubeMX safeguards, SPL integration, reference removal and device driver generation. See the [release notes](RELEASE-NOTES-2.3.0-dev1.md).
+The published `2.2.0-rc6` is a CubeMX/HAL adaptation prerelease, not certification of all devices/components.
 RC6 fixes console encoding and Windows short-path selection issues found by the first hosted CI run.
 See [RC6 notes](RELEASE-NOTES-2.2.0-rc6.md) and [scope](SUPPORT.en.md).
 Historical fixes are documented in the [reliability notes](RELIABILITY.en.md) and
@@ -18,8 +19,8 @@ Pinned dependencies do not guarantee byte-for-byte reproducible binaries.
 ```powershell
 py -3.14 -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-build.txt
-.venv\Scripts\python tools\build_release.py releases\2.2.0-rc6
-.venv\Scripts\python tools\verify_release.py releases\2.2.0-rc6
+.venv\Scripts\python tools\build_release.py releases\2.3.0-dev1
+.venv\Scripts\python tools\verify_release.py releases\2.3.0-dev1
 ```
 
 The output directory must not already exist. Outputs:
@@ -38,6 +39,13 @@ The portable package is unsigned, has no installer and does not require administ
 rights. Git is optional and external, not bundled. Desktop diagnostic logs live in
 `%APPDATA%/KeilPortStudio/logs` and may contain paths/output: redact before sharing and
 clean up when appropriate. Project transaction backups do not back up MCU Flash/SD data.
+
+Development builds use Windows extended paths at the source-tree copy/hash and
+transaction directory backup/cleanup I/O boundaries, handling deep SDK files over
+260 characters without changing system long-path policy. Prefixes are not written
+to Keil project references or manifests. Short project roots are still recommended:
+this does not establish arbitrary long-path support in old Keil/compiler tools,
+nor does it certify every path operation in this application.
 
 ## Verification requirements
 

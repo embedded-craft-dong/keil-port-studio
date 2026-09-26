@@ -2,7 +2,8 @@
 
 [English](RELEASE.en.md)
 
-当前版本 `2.2.0-rc6` 是 CubeMX/HAL 适配预发布版，不宣称所有组件/芯片/组合已验证。
+当前 `2.3.0-dev1` 预发布版提供源码和 Windows 包，新增工程体检、CubeMX 共存保护、SPL 适配、引用移除和器件驱动生成。见[本次发布说明](RELEASE-NOTES-2.3.0-dev1.md)。
+已发布版本 `2.2.0-rc6` 是 CubeMX/HAL 适配预发布版，不宣称所有组件/芯片/组合已验证。
 RC6 修复首次云端 CI 暴露的控制台编码与 Windows 短路径选择问题；见[RC6 说明](RELEASE-NOTES-2.2.0-rc6.md)
 和[适配范围](SUPPORT.zh-CN.md)。历史修复见[可靠性说明](RELIABILITY.zh-CN.md)
 与[RC4 发布说明](RELEASE-NOTES-2.2.0-rc4.md)；具体实板结果见
@@ -17,8 +18,8 @@ Python 3.8+ 与打包依赖所需 Python 版本不是同一概念。打包器版
 ```powershell
 py -3.14 -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-build.txt
-.venv\Scripts\python tools\build_release.py releases\2.2.0-rc6
-.venv\Scripts\python tools\verify_release.py releases\2.2.0-rc6
+.venv\Scripts\python tools\build_release.py releases\2.3.0-dev1
+.venv\Scripts\python tools\verify_release.py releases\2.3.0-dev1
 ```
 
 输出目录必须不存在，以免覆盖以前的发布。生成：
@@ -35,6 +36,11 @@ py -3.14 -m venv .venv
 便携包没有签名/安装器，不要求管理员权限。Git 是可选外部程序，不打入 EXE。
 桌面程序的诊断日志保存在 `%APPDATA%/KeilPortStudio/logs`，会包含工程路径和输出；
 分享日志前脱敏，并按需清理。项目事务备份不等于 MCU Flash/SD 数据备份。
+
+开发版在源码树复制、哈希与事务目录备份/清理的文件 I/O 边界使用 Windows 扩展路径，
+用于处理 SDK 内超过 260 字符的深层文件，不要求修改系统长路径策略；扩展前缀不会写入
+Keil 工程引用或清单。仍建议把工程放在较短路径：这不保证旧 Keil、编译器和其他外部
+工具支持任意长路径，也不代表本工具的所有路径操作都已完成超长路径验收。
 
 ## 验证要求
 

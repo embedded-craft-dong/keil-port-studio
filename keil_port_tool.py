@@ -10,7 +10,7 @@ r"""
       - 头文件 -> 将其所在目录加入 include path
       - (可选) 同时把头文件加入工程文件树, 便于浏览
    2. 一键移植 FreeRTOS + CMSIS-RTOS V2
-      - 共享目录只作为源码仓库；先复制到工程 Middlewares/Third_Party，再添加相对引用
+      - 共享目录只作为源码仓库；CubeMX 新组件复制到工程 KPS/ThirdParty，再添加相对引用
       - 自动识别芯片内核, 匹配 Keil 专用的 RVDS 移植层 (ARM_CM0/CM3/CM4F...)
       - 添加内核源码 / 内存管理(heap_4) / port.c / cmsis_os2.c 到工程
       - 自动生成 FreeRTOSConfig.h (或修补已有配置, 补齐 CMSIS-V2 所需宏)
@@ -150,7 +150,7 @@ LWIP_TAG = 'STABLE-2_2_1_RELEASE'
 TINYUSB_TAG = '0.21.0'
 TINYUSB_AC5_TAG = '0.17.0'       # ARM Compiler 5 使用较保守且已验证广泛的版本
 TINYUSB_AC5_HOST_TAG = '0.18.0'  # DWC2 Host requires hcd_dwc2.c plus scoped AC5 fixes
-TOOL_VERSION = '2.2.0-rc6'
+TOOL_VERSION = '2.3.0-dev1'
 RTTHREAD_TAG = 'v5.2.2'
 RTTHREAD_SHA256 = 'c40bd84ee10389988d10cb64dda0ed63d8df719a6a2065cbc1c49bebac4f45b0'
 CMSIS_OS2_H_URL = ('https://raw.githubusercontent.com/ARM-software/CMSIS_5/5.9.0/'
@@ -188,11 +188,23 @@ _SOURCE_DIR = str(Path(__file__).resolve().parent)
 if _SOURCE_DIR not in sys.path:
     sys.path.insert(0, _SOURCE_DIR)
 from kps_core.errors import ToolError
+from kps_core.doctor import inspect_project, format_report as format_health_report, export_report as export_health_report
 from kps_core.runtime import _OPERATION_LOCAL, operation_context
 from kps_core.source_patches import (PatchResult, _c_code, _c_function,
     patch_cmsis_wrapper_systick, patch_project_systick, patch_project_rtos_exceptions,
     patch_main_start_scheduler, patch_rtthread_irq)
-from kps_core.ownership import _edit_hunks, _reverse_owned_hunks
+from kps_core.ownership import _edit_hunks, _reverse_owned_hunks, spl_insertion_hunks
+from kps_core.project_layout import (project_profile, active_sources, discover_entry,
+    validate_spl_rtos, validate_spl_cmsis, patch_spl_main, patch_spl_tick,
+    patch_spl_rtthread_irq, patch_spl_component)
+from kps_core.cubemx import inspect_coexistence
+from kps_core.cubemx_recovery import plan_recovery, plan_isolation
+from kps_core.dsp_dependencies import missing_modules as missing_dsp_modules
+from kps_core.filesystem import filesystem_path, copy_tree, copy_file, remove_tree
+from kps_core.reference_actions import inventory as reference_inventory, remove_references as _remove_references
+from kps_core.driver_generator import plan_drivers
+from kps_core.device_drivers import CATALOG as DRIVER_CATALOG, I2C_MODES, SPI_MODES
+from kps_core.driver_gui import open_reference_manager, open_driver_generator
 
 
 USER_SETTINGS_DEFAULTS = {
@@ -283,7 +295,18 @@ def detect_text_format(path):
             except UnicodeDecodeError:
                 continue
         else:
-            raise ToolError('无法识别文件编码，为避免损坏已停止修改: %s' % path)
+            # Some ST SPL releases contain Windows-1252 en-dashes in comments.
+            # Allow a round-trippable fallback ONLY for C sources with entirely
+            # ASCII code outside comments/literals, not arbitrary XML/binary.
+            try:
+                western = payload.decode('cp1252')
+                code = _c_code(western)
+                if (path.suffix.lower() not in ('.c', '.h') or
+                        any(ord(ch) > 127 or (ord(ch) < 32 and ch not in '\t\r\n') for ch in code)):
+                    raise ValueError('not an ASCII C source')
+                encoding = 'cp1252'
+            except (UnicodeDecodeError, ValueError):
+                raise ToolError('无法识别文件编码，为避免损坏已停止修改: %s' % path)
     try:
         text = payload.decode(encoding)
     except UnicodeDecodeError as e:
@@ -316,7 +339,7 @@ def encode_preserving_format(path, content):
 
 def sha256_file(path):
     h = hashlib.sha256()
-    with open(str(path), 'rb') as f:
+    with filesystem_path(path).open('rb') as f:
         while True:
             chunk = f.read(1 << 20)
             if not chunk:
@@ -327,7 +350,7 @@ def sha256_file(path):
 
 def sha256_tree(path):
     h = hashlib.sha256()
-    root = Path(path)
+    root = filesystem_path(path)
     for item in sorted(p for p in root.rglob('*') if p.is_file()):
         h.update(str(item.relative_to(root)).replace('\\', '/').encode('utf-8'))
         h.update(bytes.fromhex(sha256_file(item)))
@@ -708,8 +731,14 @@ def plan_project_library_copy(proj, source_root, folder_name, locator, rep):
     if not any(item.get('path') == str(source_root) for item in rep.sources):
         rep.sources.append({'kind': 'local', 'path': str(source_root),
                             'tree_sha256': None})
-    local_root = (project_content_root(proj) / 'Middlewares' / 'Third_Party' /
-                  folder_name).resolve()
+    project_root = project_content_root(proj)
+    legacy_root = (project_root / 'Middlewares' / 'Third_Party' / folder_name).resolve()
+    # CubeMX can delete Middlewares when the IOC does not enable middleware.
+    # Keep new copies outside its generated directory tree. Never silently move
+    # an existing user-modified legacy tree; recovery must retain that evidence.
+    local_root = ((project_root / 'KPS' / 'ThirdParty' / folder_name).resolve()
+                  if any(project_root.glob('*.ioc')) and not legacy_root.exists()
+                  else legacy_root)
     if source_root == local_root:
         return source_root, local_root
 
@@ -791,7 +820,7 @@ def _ensure_cmsis_os2_wrapper(base, opts):
         dst = os2_dir / name
         if dst.is_file() and refresh:
             bak = dst.with_name(dst.name + '.bak_' + ts)
-            shutil.copy2(str(dst), str(bak))
+            copy_file(dst, bak)
             info('旧适配文件已备份: %s' % bak)
         elif dst.is_file():
             continue
@@ -854,7 +883,8 @@ def ensure_lvgl_sdk(proj, opts, rep):
     if getattr(opts, 'interactive', False):
         if not ask_yn('未找到 LVGL 源码, 是否自动下载到 %s ?' % sdk, True):
             return None
-    ac6 = proj.any_ac6()
+    # A shared SDK must also work for every selected AC5 target.
+    ac6 = bool(proj.targets) and all(proj.is_ac6(t) for t in proj.targets)
     override = os.environ.get('KEIL_TOOL_LVGL_URL') or CONFIG.get('LVGL_URL')
     if override:
         url, tag = override, 'custom'
@@ -871,7 +901,7 @@ def ensure_lvgl_sdk(proj, opts, rep):
     rep.sources.append(download_archive(url, zip_path, 'LVGL (%s)' % tag))
     top = extract_zip(zip_path, sdk,
                       keep_prefixes=('src/', 'examples/porting/'),
-                      keep_files=('lvgl.h', 'lv_conf_template.h', 'LICENSE.txt', 'README.md'))
+                      keep_files=('lvgl.h', 'lv_version.h', 'lv_conf_template.h', 'LICENSE.txt', 'README.md'))
     root = locate_lvgl_root(top)
     if root is None:
         raise ToolError('下载解压后仍未找到 LVGL 源码结构, '
@@ -1156,6 +1186,7 @@ class Report:
         'lwip': '移植 LwIP 网络协议栈',
         'tinyusb': '移植 TinyUSB 协议栈',
         'project_settings': '工程元素与编译设置',
+        'device_drivers': '器件驱动 / Device drivers',
     }
 
     def __init__(self, key):
@@ -1168,6 +1199,7 @@ class Report:
         self.obsolete_files = []  # (路径, 说明) 写入时移为时间戳备份
         self.sources = []     # 下载 URL、归档哈希与缓存来源
         self.source_edits = []  # Exact, reversible edits owned by this component.
+        self.spl_entry_edits = {}  # Byte insertions with semantic entry validation.
         self.notes = []
         self.warnings = []
 
@@ -1877,7 +1909,7 @@ class KeilProject:
             raise ToolError('工程文件在规划后被外部修改，已停止写入；请重新载入工程')
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         bak = self.path.with_name(self.path.name + '.bak_' + ts)
-        shutil.copy2(str(self.path), str(bak))
+        copy_file(self.path, bak)
         self.path.write_bytes(payload)
         self.original_bytes = payload
         self.original_text = payload[len(self.xml_bom):].decode(self.xml_encoding)
@@ -1990,6 +2022,8 @@ def scan_exclusion_roots(proj, scan_dirs):
     third_party = current_root / 'Middlewares' / 'Third_Party'
     if third_party.is_dir():
         managed_roots.add(third_party.resolve())
+    if (current_root / 'KPS').is_dir():
+        managed_roots.add((current_root / 'KPS').resolve())
     return (sorted(foreign_roots, key=lambda p: len(str(p)), reverse=True),
             sorted(output_roots, key=lambda p: len(str(p)), reverse=True),
             sorted(managed_roots, key=lambda p: len(str(p)), reverse=True))
@@ -2263,28 +2297,22 @@ def detect_port(proj, base, opts):
 
 def detect_cmsis_device_header(proj):
     """推断 CMSIS 设备头文件名，例如 STM32G431 -> stm32g4xx.h。"""
-    search_roots = [proj.dir]
-    if proj.dir.parent != proj.dir:
-        search_roots.append(proj.dir.parent)
-    for root in search_roots:
+    # Consult only selected project sources, never sibling projects/backups.
+    sources = [p for p in active_sources(proj) if p.name.lower().startswith('system_')]
+    for src in sources:
+        # Ignore referenced examples, never infer from unrelated workspace files.
+        if any(x.lower() in ('examples', 'example') for x in src.parts):
+            continue
         try:
-            sources = sorted(root.rglob('system_*.c'))
+            head = read_source_text(src)[:128000]
         except OSError:
-            sources = []
-        for src in sources:
-            # 忽略 CMSIS 自带示例，优先工程自身的 system_xxx.c。
-            if any(x.lower() in ('examples', 'example') for x in src.parts):
+            continue
+        for name in re.findall(r'#\s*include\s*[<"]([^>"]+\.h)[>"]', head):
+            low = name.lower()
+            if low.startswith('system_') or low.startswith('core_'):
                 continue
-            try:
-                head = read_source_text(src)[:12000]
-            except OSError:
-                continue
-            for name in re.findall(r'#\s*include\s*[<"]([^>"]+\.h)[>"]', head):
-                low = name.lower()
-                if low.startswith('system_') or low.startswith('core_'):
-                    continue
-                if low.startswith(('stm32', 'gd32', 'nrf', 'lpc', 'mm32', 'hc32', 'at32', 'apm32')):
-                    return name
+            if low.startswith(('stm32', 'gd32', 'nrf', 'lpc', 'mm32', 'hc32', 'at32', 'apm32')):
+                return name
 
     dev = (proj.device() or '').lower()
     m = re.match(r'stm32([a-z][0-9])', dev)
@@ -2519,7 +2547,8 @@ def find_cmsis_os_tick_source(proj):
     # Only search roots belonging to this project, pruning backups and examples.
     # Never walk the parent workspace (which can contain unrelated projects).
     content = project_content_root(proj)
-    for root in (content / 'Drivers' / 'CMSIS', content / 'CMSIS', proj.dir / 'RTE'):
+    for root in (content / 'Drivers' / 'CMSIS', content / 'CMSIS',
+                 content / 'Libraries' / 'CMSIS', proj.dir / 'RTE'):
         if not root.is_dir():
             continue
         for directory, dirs, files in os.walk(str(root)):
@@ -2537,6 +2566,7 @@ def find_project_cmsis_os2_include(proj, os_tick_source=None):
         source_dir = Path(os_tick_source).resolve().parent
         candidates.extend((source_dir.parent / 'Include', source_dir / 'Include'))
     candidates.extend((content / 'Drivers' / 'CMSIS' / 'RTOS2' / 'Include',
+                       content / 'Libraries' / 'CMSIS' / 'RTOS2' / 'Include',
                        proj.dir / 'Drivers' / 'CMSIS' / 'RTOS2' / 'Include'))
     seen = set()
     for candidate in candidates:
@@ -2593,6 +2623,8 @@ void MX_FREERTOS_Init(void);
  * See docs/POST-PORTING.en.md / docs/POST-PORTING.zh-CN.md (FreeRTOS).
  * Add thread handles/attributes in this file and create them in MX_FREERTOS_Init().
  * Put each task's work in its corresponding task function.
+ * CubeMX: enable Keep User Code; keep this file in KPS/FreeRTOS/App.
+ * 重新生成前备份；生成后体检，必要时运行 --cubemx-recover；见 docs/CUBEMX.*.md。
  */
 #include "FreeRTOS.h"
 #include "task.h"
@@ -2673,6 +2705,8 @@ void MX_FREERTOS_Init(void);
  * Tasks must not return: loop, or call vTaskDelete(NULL) to finish.
  * 任务不能直接 return；完成后显式 vTaskDelete(NULL)。
  * main.c already starts the scheduler; 不要重复启动调度器。
+ * CubeMX: enable Keep User Code, keep new task files in KPS/FreeRTOS/App.
+ * 重新生成前备份；生成后体检，必要时运行 --cubemx-recover；见 docs/CUBEMX.*.md。
  * See docs/POST-PORTING.en.md / docs/POST-PORTING.zh-CN.md (FreeRTOS). */
 #include "FreeRTOS.h"
 #include "task.h"
@@ -2696,11 +2730,14 @@ TaskHandle_t defaultTaskHandle;
 
 static void StartDefaultTask(void *argument)
 {
+    TickType_t delay_ticks = pdMS_TO_TICKS(1U);
     (void)argument;
+    /* Never turn a short sleep into a non-blocking yield at low tick rates. */
+    if (delay_ticks == 0U) delay_ticks = 1U;
     for (;;)
     {
         /* Put the default task processing here. */
-        vTaskDelay(pdMS_TO_TICKS(1U));
+        vTaskDelay(delay_ticks);
     }
 }
 
@@ -2712,11 +2749,33 @@ void MX_FREERTOS_Init(void)
     /* Add further xTaskCreate() calls here. */
 }
 '''
+    if not use_os2:
+        source += '''
+/* Native FreeRTOS has no CMSIS wrapper to supply static system-task memory. */
+#if configSUPPORT_STATIC_ALLOCATION == 1
+void vApplicationGetIdleTaskMemory(StaticTask_t **tcb, StackType_t **stack, uint32_t *depth)
+{
+    static StaticTask_t idle_tcb;
+    static StackType_t idle_stack[configMINIMAL_STACK_SIZE];
+    *tcb = &idle_tcb; *stack = idle_stack; *depth = configMINIMAL_STACK_SIZE;
+}
+#if configUSE_TIMERS == 1
+void vApplicationGetTimerTaskMemory(StaticTask_t **tcb, StackType_t **stack, uint32_t *depth)
+{
+    static StaticTask_t timer_tcb;
+    static StackType_t timer_stack[configTIMER_TASK_STACK_DEPTH];
+    *tcb = &timer_tcb; *stack = timer_stack; *depth = configTIMER_TASK_STACK_DEPTH;
+}
+#endif
+#endif
+'''
     return header, source
 
 
 def add_freertos_application(proj, use_os2, rep):
     """生成类似 CubeMX 的 freertos_app.c/h，并让 main.c 自动启动调度器。"""
+    spl = project_profile(proj) == 'stm32-spl'
+    spl_main = discover_entry(proj, read_source_text)[0] if spl else None
     project_root = proj.dir.parent if (proj.dir.parent / 'Core').is_dir() else proj.dir
     src_dir = project_root / 'Core' / 'Src'
     inc_dir = project_root / 'Core' / 'Inc'
@@ -2724,6 +2783,14 @@ def add_freertos_application(proj, use_os2, rep):
         src_dir = proj.dir / 'Application'
     if not inc_dir.is_dir():
         inc_dir = src_dir
+    # CubeMX owns Core/Src and Core/Inc. New tool-owned task files belong to an
+    # independent directory. Existing task files stay put (may contain user work).
+    if (not spl and any(project_root.glob('*.ioc')) and
+            not (src_dir / 'freertos_app.c').exists() and
+            not (inc_dir / 'freertos_app.h').exists() and
+            not (src_dir / 'freertos.c').exists() and
+            not (inc_dir / 'freertos.h').exists()):
+        src_dir = inc_dir = project_root / 'KPS' / 'FreeRTOS' / 'App'
     app_c = src_dir / 'freertos_app.c'
     app_h = inc_dir / 'freertos_app.h'
     header, source = freertos_app_templates(use_os2)
@@ -2797,11 +2864,15 @@ void vAssertCalled(const char *file, int line)
         rep.files.append(('FreeRTOS/Application', app_c.name))
     proj.add_include_path(rel_or_abs(inc_dir, proj.dir), rep)
 
-    main_candidates = [project_root / 'Core' / 'Src' / 'main.c', proj.dir / 'main.c']
-    main_c = next((p for p in main_candidates if p.is_file()), None)
+    if spl:
+        main_c = spl_main
+    else:
+        main_candidates = [project_root / 'Core' / 'Src' / 'main.c', proj.dir / 'main.c']
+        main_c = next((p for p in main_candidates if p.is_file()), None)
     if main_c:
         main_text = _planned_text(proj, main_c)
-        outcome = patch_main_start_scheduler(main_text, use_os2).require_safe(main_c)
+        patcher = patch_spl_main if spl else patch_main_start_scheduler
+        outcome = patcher(main_text, use_os2).require_safe(main_c)
         new_main, changed = outcome
         if changed:
             rep.gen_files.append((main_c, new_main, '在 main() 中自动启动 FreeRTOS 调度器'))
@@ -2810,9 +2881,44 @@ void vAssertCalled(const char *file, int line)
     else:
         raise ToolError('未找到 main.c，无法验证调度器启动；请提供标准入口或选择不生成应用层')
     rep.notes.append('任务创建/处理入口: %s' % app_c)
+    if spl:
+        rep.warnings.append('STM32 SPL: 原 main 的 while(1) 业务仍保留在文件中，但调度启动后不会执行。'
+                            '请迁入 freertos_app.c 的任务；阻塞等待用 osDelay/vTaskDelay，'
+                            '不要调用抢占 SysTick 的旧延时函数。See docs/SPL.en.md.')
 
 
 def do_freertos(proj, opts, rep):
+    spl = project_profile(proj) == 'stm32-spl'
+    spl_irq = None
+    if spl:
+        selected = getattr(opts, 'freertos_files', None)
+        spl_os2 = (not getattr(opts, 'no_os2', False) and
+                   (selected is None or any(Path(p).name == 'cmsis_os2.c' for p in selected)))
+        if len(proj.targets) != len(proj.all_targets):
+            raise ToolError('SPL 启动代码可能由多个 Target 共用；请在独立工程中移植，或选择全部 Target。 / Shared SPL startup: select all Targets.')
+        if any(proj.target_core_info(t)[0] not in ('Cortex-M3', 'Cortex-M4') for t in proj.targets):
+            raise ToolError('当前 SPL 自动启动仅开放 Cortex-M3/M4；其他内核尚未验证 / SPL adapter: M3/M4 only')
+        if spl_os2 and not find_cmsis_os_tick_source(proj):
+            raise ToolError('SPL + CMSIS-V2 需要项目内 CMSIS_5 RTOS2/Include 与 RTOS2/Source/os_systick.c。'
+                            '请将其放入 Libraries/CMSIS/RTOS2；详见 docs/SPL.zh-CN.md。'
+                            ' Native API alternative: --no-os2.')
+        if spl_os2:
+            validate_spl_cmsis(proj, read_source_text)
+        # Fail before SDK downloads/copies for unsafe legacy time bases.
+        validate_spl_rtos(proj, read_source_text,
+                          ignore_sources=[find_cmsis_os_tick_source(proj)])
+        if getattr(opts, 'freertos_app', True):
+            main_path, main_text = discover_entry(proj, read_source_text)
+            patch_spl_main(main_text, spl_os2).require_safe(main_path)
+        spl_irq = discover_entry(proj, read_source_text, 'SysTick_Handler', 'void')
+        patch_spl_tick(spl_irq[1]).require_safe(spl_irq[0])
+        for source in active_sources(proj):
+            if source == spl_irq[0] or (proj.dir / 'Middlewares/Third_Party/FreeRTOS').resolve() in source.parents:
+                continue
+            code = _c_code(read_source_text(source))
+            if re.search(r'\b(?:SVC_Handler|PendSV_Handler)\s*\([^;{}]*\)\s*\{', code):
+                raise ToolError('SPL exception handlers are split across files; manual review required: ' + str(source))
+        rep.notes.append('STM32 SPL adapter: selected-target source discovery; no CubeMX/HAL required.')
     if opts.freertos:
         requested_base = locate_freertos_source(opts.freertos)
         if requested_base is None:
@@ -2896,6 +3002,8 @@ def do_freertos(proj, opts, rep):
     if use_os2 and not os2_c.is_file():
         rep.warnings.append('未找到 CMSIS_RTOS_V2/cmsis_os2.c (内核版本过旧?), 已跳过 CMSIS-V2 封装')
         use_os2 = False
+    if use_os2:
+        proj.enable_c99_gnu(rep)
     os_tick_c = find_cmsis_os_tick_source(proj) if use_os2 else None
 
     for f in kernel:
@@ -2953,7 +3061,10 @@ def do_freertos(proj, opts, rep):
                 if wrapper_changed:
                     rep.gen_files.append((project_path(os2_c), new_wrapper,
                                           '为 CMSIS-RTOS2 SysTick 添加可配置保护'))
-                new_irq, irq_changed = patch_project_systick(systick_text).require_safe(systick_file)
+                if spl_irq:
+                    systick_file, systick_text = spl_irq
+                tick_patcher = patch_spl_tick if spl else patch_project_systick
+                new_irq, irq_changed = tick_patcher(systick_text).require_safe(systick_file)
                 if irq_changed:
                     rep.gen_files.append((systick_file, new_irq,
                                           '在现有 SysTick_Handler 中接入 FreeRTOS tick'))
@@ -2966,7 +3077,19 @@ def do_freertos(proj, opts, rep):
     # Cortex-M 的 SVC/PendSV 必须直接进入 FreeRTOS 的裸汇编处理函数。
     # CubeMX 生成的空强符号会覆盖启动文件弱符号，导致 svc 0 返回空处理函数，
     # 第一个任务永远无法恢复。保留 CubeMX 源码但在端口别名存在时条件禁用。
-    irq_file, irq_text = find_project_systick_source(proj, exclude=[base, project_base])
+    if spl_irq:
+        irq_file, irq_text = spl_irq
+        # Native FreeRTOS needs the same SysTick integration, without the OS2 wrapper.
+        if not any(Path(item[0]).resolve() == irq_file for item in rep.gen_files):
+            result = patch_spl_tick(irq_text).require_safe(irq_file)
+            if result.changed:
+                rep.gen_files.append((irq_file, result.text, 'STM32 SPL FreeRTOS SysTick'))
+    else:
+        irq_file, irq_text = find_project_systick_source(proj, exclude=[base, project_base])
+        if not use_os2 and irq_file and getattr(opts, 'freertos_app', True):
+            outcome = patch_project_systick(irq_text).require_safe(irq_file)
+            if outcome.changed:
+                rep.gen_files.append((irq_file, outcome.text, 'Native FreeRTOS shared HAL SysTick'))
     if irq_file and irq_text is not None:
         planned_index = None
         working_text = irq_text
@@ -3002,6 +3125,30 @@ def do_freertos(proj, opts, rep):
             else:
                 rep.warnings.append('已定义 CMSIS_device_header，但未能定位 %s 所在目录；'
                                     '请确认该目录已加入 Include Path' % device_header)
+            if spl:
+                # Non-RTE SPL projects still need CMSIS IRQ definitions in the
+                # wrapper. Do not enable _RTE_ or pretend to manage Pack state.
+                wrapper_path = project_path(os2_c)
+                index = next((i for i, item in enumerate(rep.gen_files)
+                              if item[0] == wrapper_path), None)
+                wrapper = rep.gen_files[index][1] if index is not None else read_source_text(os2_c)
+                if '#include CMSIS_device_header' not in wrapper:
+                    anchor = '#include "cmsis_os2.h"'
+                    if wrapper.count(anchor) != 1:
+                        raise ToolError('SPL CMSIS wrapper include anchor is not unique')
+                    wrapper = wrapper.replace(anchor, '#include CMSIS_device_header\n' + anchor, 1)
+                    item = (wrapper_path, wrapper, 'SPL CMSIS wrapper device definitions')
+                    if index is None:
+                        rep.gen_files.append(item)
+                    else:
+                        rep.gen_files[index] = item
+                if not any((Path(d) / 'RTE_Components.h').is_file() for d in proj.include_dirs_abs()):
+                    shim = proj.dir / 'FreeRTOS/Config/RTE_Components.h'
+                    rep.gen_files.append((shim,
+                        '/* Non-RTE CMSIS OS Tick compatibility header; not a Pack selection. */\n'
+                        '#ifndef KPS_SPL_RTE_COMPONENTS_H\n#define KPS_SPL_RTE_COMPONENTS_H\n'
+                        '#ifndef CMSIS_device_header\n#define CMSIS_device_header "%s"\n#endif\n#endif\n' % device_header,
+                        'Non-RTE CMSIS compatibility header'))
         else:
             rep.warnings.append('无法自动识别 CMSIS_device_header；请在 FreeRTOSConfig.h 中定义它')
     existing = find_in_tree(proj.dir, 'FreeRTOSConfig.h', exclude=[base, project_base])
@@ -3127,15 +3274,21 @@ def locate_lvgl_root(d):
 
 
 def lvgl_version(root):
-    for cand in (root / 'lv_version.h', root / 'src' / 'lv_version.h'):
+    # v8 keeps these macros in lvgl.h; newer layouts use lv_version.h.
+    root = Path(root)
+    versions = set()
+    for cand in (root / 'lv_version.h', root / 'src' / 'lv_version.h',
+                 root / 'lvgl.h'):
         try:
             text = read_source_text(cand)
         except OSError:
             continue
-        m = re.search(r'LVGL_VERSION_MAJOR\s+(\d+)', text)
-        if m:
-            return int(m.group(1))
-    return 0
+        versions.update(int(value) for value in re.findall(
+            r'(?m)^[ \t]*#[ \t]*define[ \t]+LVGL_VERSION_MAJOR[ \t]+\(?[ \t]*(\d+)\b',
+            _c_code(text)))
+    if len(versions) > 1:
+        raise ToolError('LVGL 版本头文件互相冲突，请使用同一版本的完整源码: %s' % root)
+    return next(iter(versions)) if versions else 0
 
 
 def enable_lv_conf(text):
@@ -3357,7 +3510,7 @@ def do_lvgl(proj, opts, rep):
         if copied:
             proj.add_include_path('LVGL\\porting', rep)
 
-    if ver >= 9 and not proj.any_ac6():
+    if ver >= 9 and any(not proj.is_ac6(t) for t in proj.targets):
         rep.warnings.append('LVGL v9 不支持 Arm Compiler 5 (AC5), '
                             '请在 Keil 中切换到 AC6 (Options -> Target -> ARM Compiler -> V6)')
     rep.notes.append('已添加 %d 个 LVGL 源文件' % count)
@@ -3389,6 +3542,9 @@ def locate_rtthread_root(path):
 
 
 def project_uses_rtthread(proj):
+    if getattr(proj, 'targets', None) and project_profile(proj) == 'stm32-spl':
+        return any('rtthread' in rel_or_abs(p, proj.dir).lower() or
+                   'rt-thread' in rel_or_abs(p, proj.dir).lower() for p in active_sources(proj))
     return any('rtthread' in str(p).lower() or 'rt-thread' in str(p).lower()
                for p in proj.files_in_project())
 
@@ -3456,7 +3612,7 @@ RTTHREAD_CONFIG = '''#ifndef KPS_RTCONFIG_H
 #define RT_USING_CONSOLE
 #define RT_CONSOLEBUF_SIZE 128
 #define RT_USING_CPU_FFS
-/* No RT_USING_USER_MAIN: CubeMX main initializes peripherals before KPS start. */
+/* No RT_USING_USER_MAIN: board main initializes peripherals before KPS start. */
 #define KPS_RTTHREAD_HEAP_SIZE 16384
 #define KPS_RTTHREAD_APP_STACK_SIZE 2048
 #endif
@@ -3486,7 +3642,7 @@ volatile rt_uint32_t g_rtthread_heartbeat;
 volatile rt_uint32_t g_rtthread_assert_line;
 
 #if RT_TICK_PER_SECOND != 1000
-#error "KPS CubeMX shared SysTick requires RT_TICK_PER_SECOND=1000 for the HAL 1 ms tick"
+#error "KPS initial port requires RT_TICK_PER_SECOND=1000 (also preserves HAL 1 ms tick)"
 #endif
 #ifdef RT_DEBUGING_ASSERT
 static void KPS_RTThread_Assert(const char *expression, const char *function, rt_size_t line)
@@ -3543,7 +3699,7 @@ void MX_RTTHREAD_Init(void)
     rt_system_timer_thread_init();
     rt_thread_idle_init();
     rt_thread_defunct_init();
-    /* Clock is sampled AFTER CubeMX SystemClock_Config(). HAL tick stays 1 ms. */
+    /* Sample AFTER board clock initialization (HAL or SPL); tick is 1 ms. */
     SystemCoreClockUpdate();
     status = (rt_err_t)SysTick_Config(SystemCoreClock / RT_TICK_PER_SECOND);
     RT_ASSERT(status == 0);
@@ -3565,6 +3721,20 @@ def do_rtthread(proj, opts, rep):
         raise ToolError('RT-Thread 会接入共享 main/中断文件；暂不允许只修改部分 Target')
     if any(proj.target_core_info(t)[0] != 'Cortex-M4' for t in proj.targets):
         raise ToolError('当前 RT-Thread 配置仅支持 Cortex-M4 单核；其他内核需独立端口验证')
+    spl = project_profile(proj) == 'stm32-spl'
+    if spl:
+        # Validate before SDK acquisition and before adding any planned file.
+        main, main_text = discover_entry(proj, read_source_text)
+        irq, irq_text = discover_entry(proj, read_source_text, 'SysTick_Handler', 'void')
+        validate_spl_rtos(proj, read_source_text)
+        spl_main = patch_spl_main(main_text, rtos='rtthread').require_safe(str(main))
+        spl_irq = patch_spl_rtthread_irq(irq_text).require_safe(str(irq))
+        for path in active_sources(proj):
+            if path == irq:
+                continue
+            code = _c_code(read_source_text(path))
+            if re.search(r'\b(?:PendSV_Handler|HardFault_Handler)\s*\([^;{}]*\)\s*\{', code):
+                raise ToolError('RT-Thread 异常处理在其他源文件中，拒绝重复接管: ' + str(path))
     requested = getattr(opts, 'rtthread', None) or 'auto'
     if str(requested).lower() == 'auto':
         requested = ensure_rtthread_sdk(proj, opts, rep)
@@ -3594,13 +3764,14 @@ def do_rtthread(proj, opts, rep):
     if not device_path:
         raise ToolError('未能定位 CMSIS 设备头文件；无法安全生成 RT-Thread 时钟端口')
     content = project_content_root(proj)
-    main = content / 'Core/Src/main.c'
-    irq, irq_text = find_project_systick_source(proj, exclude=[root, local])
-    if not main.is_file() or not irq:
-        raise ToolError('当前自动启动支持 CubeMX Core/Src/main.c 与 SysTick 中断文件')
-    main_text = _planned_text(proj, main)
-    if '/* USER CODE END 2 */' not in main_text:
-        raise ToolError('main.c 缺少 USER CODE 2 区；不自动插入调度启动')
+    if not spl:
+        main = content / 'Core/Src/main.c'
+        irq, irq_text = find_project_systick_source(proj, exclude=[root, local])
+        if not main.is_file() or not irq:
+            raise ToolError('自动启动需要 CubeMX USER CODE 或已识别的 STM32 标准库工程')
+        main_text = _planned_text(proj, main)
+        if '/* USER CODE END 2 */' not in main_text:
+            raise ToolError('main.c 缺少 USER CODE 2 区；不自动插入调度启动')
     config_dir = content / 'RTThread/Config'
     app_dir = content / 'RTThread/App'
     if (config_dir / 'rtconfig.h').is_file():
@@ -3630,7 +3801,10 @@ def do_rtthread(proj, opts, rep):
             rep.gen_files.append((path, value, 'RT-Thread 工程私有配置/任务入口'))
         if path.suffix == '.c' and proj.add_file('RTThread/App', path.name, 1, rel_or_abs(path, proj.dir)):
             rep.files.append(('RTThread/App', path.name))
-    new_main, changed = _patch_component_init(main_text, 'rtthread_app.h', 'MX_RTTHREAD_Init();')
+    if spl:
+        new_main, changed = spl_main
+    else:
+        new_main, changed = _patch_component_init(main_text, 'rtthread_app.h', 'MX_RTTHREAD_Init();')
     main_span = _c_function(new_main, 'main', 'int')
     body = _c_code(new_main[main_span[1] + 1:main_span[2] - 1]) if main_span else ''
     calls = list(re.finditer(r'\bMX_RTTHREAD_Init\s*\(\s*\)\s*;', body))
@@ -3638,24 +3812,32 @@ def do_rtthread(proj, opts, rep):
         raise ToolError('无法确认 main 中 RT-Thread 启动调用的位置/可达性；未写入，请手动适配')
     if changed:
         rep.gen_files.append((main, new_main, '外设初始化后自动启动 RT-Thread'))
-    updated_irq = patch_rtthread_irq(_planned_text(proj, irq))
+    updated_irq = spl_irq.text if spl else patch_rtthread_irq(_planned_text(proj, irq))
     if updated_irq != _planned_text(proj, irq):
         rep.gen_files.append((irq, updated_irq, 'RT-Thread SysTick/PendSV/HardFault 适配'))
     rep.notes.append('标准内核 5.2.2 / Cortex-M4 单核；不自动安装 BSP、DFS、FinSH、软件包或 SMP')
     rep.notes.append('任务入口 RTThread/App/rtthread_app.c；已有 rtconfig.h 与任务文件保留，不覆盖用户修改')
+    if spl:
+        rep.warnings.append('标准库 main 的原 while(1) 保留但调度启动后不再执行；请将业务迁入 RTThread_DefaultTask。')
+        rep.notes.append('SPL 适配不依赖 HAL/CubeMX；SysTick 归 RT-Thread，传统延时需使用 DWT/TIM。')
 
 
 def project_uses_freertos(proj):
     """判断工程当前是否已经包含 FreeRTOS（也能识别本次任务刚加入的 XML 项）。"""
     markers = ('freertos.h', 'task.h', 'cmsis_os2.c', 'freertos_app.c')
-    for value in proj.files_in_project():
+    spl = bool(getattr(proj, 'targets', None)) and project_profile(proj) == 'stm32-spl'
+    for value in (active_sources(proj) if spl else proj.files_in_project()):
+        if spl:
+            value = rel_or_abs(value, proj.dir)
         low = str(value).replace('\\', '/').lower()
         if any(('/' + marker) in ('/' + low) for marker in markers):
             return True
         if 'freertos' in low or 'cmsis-rtos' in low or 'cmsis_rtos' in low:
             return True
+    if spl:
+        return False  # Leftover config/disabled sources do not start a kernel.
     root = project_content_root(proj)
-    for rel in ('Core/Src/freertos_app.c', 'Core/Src/freertos.c',
+    for rel in ('KPS/FreeRTOS/App/freertos_app.c', 'Core/Src/freertos_app.c', 'Core/Src/freertos.c',
                 'FreeRTOS/Config/FreeRTOSConfig.h'):
         if (root / Path(rel)).is_file():
             return True
@@ -3725,7 +3907,7 @@ def find_c_function_definitions(root, function_name, exclude=()):
     return sorted(set(hits))
 
 
-def patch_fatfs_config(text, use_rtos):
+def patch_fatfs_config(text, use_rtos, preserve_user=False):
     """同步新旧 FatFS 配置名，并为无 RTC 的通用工程提供可直接链接的默认值。"""
     changed = False
     values = {
@@ -3740,6 +3922,8 @@ def patch_fatfs_config(text, use_rtos):
     }
     found_reentrant = False
     for name, value in tuple(values.items()) + tuple(legacy.items()):
+        if preserve_user and name in ('FF_FS_TIMEOUT', '_FS_TIMEOUT', 'FF_FS_NORTC', '_FS_NORTC'):
+            continue
         pat = re.compile(r'^[ \t]*#define[ \t]+' + re.escape(name) + r'\b[^\r\n]*', re.M)
         m = pat.search(text)
         if not m:
@@ -3754,8 +3938,9 @@ def patch_fatfs_config(text, use_rtos):
             text = text[:m.start()] + newline + text[m.end():]
             changed = True
     if not found_reentrant:
-        line = '#define FF_FS_REENTRANT     %s\n#define FF_FS_TIMEOUT       1000\n' % (
-            '1' if use_rtos else '0')
+        line = '#define FF_FS_REENTRANT     %s\n' % ('1' if use_rtos else '0')
+        if not re.search(r'^\s*#\s*define\s+(?:FF_FS_TIMEOUT|_FS_TIMEOUT)\b', text, re.M):
+            line += '#define FF_FS_TIMEOUT       1000\n'
         end = text.rfind('#endif')
         if end < 0:
             end = len(text)
@@ -3896,7 +4081,10 @@ void MX_FATFS_Init(void)
 {
     /* KPS_USER_ACTION: 这里只注册驱动，不是挂载 / Registers the driver, not a mount.
      * After hardware is ready, f_mount(&USERFatFS, USERPath, 1) and check FRESULT.
-     * RTOS 下在线程中挂载；不要因任意挂载错误就格式化 / Never format blindly. */
+     * RTOS 下在线程中挂载；不要因任意挂载错误就格式化 / Never format blindly.
+     * FIL + local I/O/LFN buffers consume stack. Budget main/task stack BEFORE
+     * calling FatFS; measure high-water/canaries, not only free heap.
+     * 文件对象和局部读写/长文件名缓冲也占栈；先核对主栈/任务栈，不能只看剩余堆。 */
     (void)FATFS_LinkDriver(&USER_Driver, USERPath);
 }
 '''
@@ -3952,6 +4140,62 @@ void ff_mutex_give(int vol)
 '''
 
 
+def fatfs_freertos_system_template():
+    return '''/* FatFS native FreeRTOS backend generated by keil_port_tool.py.
+ * No HAL / CMSIS wrapper required. Mount/unmount must be application-serialized.
+ * Call FatFS from tasks, not IRQs; FF_FS_TIMEOUT is in scheduler ticks. */
+#include "ff.h"
+#include "FreeRTOS.h"
+#include "semphr.h"
+#if FF_USE_LFN == 3
+void *ff_memalloc(UINT size) { return pvPortMalloc(size); }
+void ff_memfree(void *p) { vPortFree(p); }
+#endif
+#if FF_FS_REENTRANT
+#if configUSE_MUTEXES != 1
+#error FatFS requires configUSE_MUTEXES=1
+#endif
+/* Static mutex storage also supports FreeRTOS configurations without a heap. */
+static SemaphoreHandle_t locks[FF_VOLUMES + 1];
+#if configSUPPORT_STATIC_ALLOCATION == 1
+static StaticSemaphore_t lock_storage[FF_VOLUMES + 1];
+#endif
+int ff_mutex_create(int vol)
+{
+    if (vol < 0 || vol > FF_VOLUMES) return 0;
+    if (locks[vol] == NULL) {
+#if configSUPPORT_STATIC_ALLOCATION == 1
+        locks[vol] = xSemaphoreCreateMutexStatic(&lock_storage[vol]);
+#else
+        locks[vol] = xSemaphoreCreateMutex();
+#endif
+    }
+    return locks[vol] != NULL;
+}
+void ff_mutex_delete(int vol)
+{
+    if (vol >= 0 && vol <= FF_VOLUMES && locks[vol] != NULL) {
+        vSemaphoreDelete(locks[vol]); locks[vol] = NULL;
+    }
+}
+int ff_mutex_take(int vol)
+{
+    TickType_t timeout;
+    if (vol < 0 || vol > FF_VOLUMES || locks[vol] == NULL) return 0;
+    /* Saturate to a finite wait, including kernels with 16-bit ticks. */
+    timeout = ((uint64_t)FF_FS_TIMEOUT >= (uint64_t)portMAX_DELAY) ?
+              (TickType_t)(portMAX_DELAY - 1U) : (TickType_t)FF_FS_TIMEOUT;
+    return xSemaphoreTake(locks[vol], timeout) == pdTRUE;
+}
+void ff_mutex_give(int vol)
+{
+    if (vol >= 0 && vol <= FF_VOLUMES && locks[vol] != NULL)
+        (void)xSemaphoreGive(locks[vol]);
+}
+#endif
+'''
+
+
 def do_fatfs(proj, opts, rep):
     if getattr(opts, 'fatfs', None):
         requested_root = locate_fatfs_root(opts.fatfs)
@@ -3972,16 +4216,18 @@ def do_fatfs(proj, opts, rep):
     requested_root = Path(requested_root).resolve()
     use_rtos = fatfs_rtos_mode(proj, opts)
     use_rtthread = use_rtos and project_uses_rtthread(proj)
+    # SPL must not acquire an implicit CMSIS dependency in native FreeRTOS mode.
+    use_native = use_rtos and not use_rtthread and project_profile(proj) == 'stm32-spl'
     if use_rtos and not (project_uses_freertos(proj) or use_rtthread):
         raise ToolError('FatFS 选择了 FreeRTOS 模式，但工程尚未接入 FreeRTOS。'
                         '请同时启用 FreeRTOS 任务，或把 FatFS 模式改为“裸机”。')
     root, project_fatfs = plan_project_library_copy(
         proj, requested_root, 'FatFS', locate_fatfs_root, rep)
     root = Path(root).resolve()
-    system_file = None if use_rtthread else find_fatfs_system_file(root, use_rtos)
-    if use_rtthread and not re.search(r'\bff_mutex_create\s*\(', read_source_text(root / 'ff.h')):
-        raise ToolError('RT-Thread FatFS 后端当前支持 ff_mutex_* 接口版本；旧 ff_cre_syncobj 版本需另行适配')
-    if use_rtos and not use_rtthread and system_file is None:
+    system_file = None if (use_rtthread or use_native) else find_fatfs_system_file(root, use_rtos)
+    if (use_rtthread or use_native) and not re.search(r'\bff_mutex_create\s*\(', _c_code(read_source_text(root / 'ff.h'))):
+        raise ToolError('原生 RTOS FatFS 后端当前支持 ff_mutex_* 接口版本；旧 ff_cre_syncobj 版本需另行适配')
+    if use_rtos and not (use_rtthread or use_native) and system_file is None:
         raise ToolError('当前 FatFS 源码没有可用的 FreeRTOS 系统层；支持 '
                         'ffsystem_cmsis_os.c，或包含 CMSIS-OS/ff_mutex 实现的 ffsystem.c')
     system_name = system_file.name if system_file else '由 ffconf.h 裁剪（无需系统层）'
@@ -4037,10 +4283,16 @@ def do_fatfs(proj, opts, rep):
     project_root = project_content_root(proj)
     app_dir = project_root / 'FatFs' / 'App'
     target_dir = project_root / 'FatFs' / 'Target'
-    if use_rtthread:
-        system_path = target_dir / 'ffsystem_rtthread.c'
-        _plan_owned_template(system_path, fatfs_rtthread_system_template(),
-                             'generated by keil_port_tool.py', 'FatFS 原生 RT-Thread 系统层', rep)
+    backend = 'rtthread' if use_rtthread else ('freertos' if use_native else None)
+    for old_backend in ('rtthread', 'freertos'):
+        if old_backend != backend:
+            proj.remove_file(target_dir / ('ffsystem_%s.c' % old_backend))
+    if backend:
+        system_path = target_dir / ('ffsystem_%s.c' % backend)
+        system_name = system_path.name
+        system_template = fatfs_rtthread_system_template() if use_rtthread else fatfs_freertos_system_template()
+        _plan_owned_template(system_path, system_template,
+                             'generated by keil_port_tool.py', 'FatFS 原生 %s 系统层' % backend, rep)
         if proj.add_file('FatFS/System', system_path.name, 1, rel_or_abs(system_path, proj.dir)):
             rep.files.append(('FatFS/System', system_path.name))
     config_candidates = (
@@ -4061,7 +4313,7 @@ def do_fatfs(proj, opts, rep):
     config_dir = config_file.parent
     if config_file.is_file():
         config_text = read_source_text(config_file)
-        config_text, changed = patch_fatfs_config(config_text, use_rtos)
+        config_text, changed = patch_fatfs_config(config_text, use_rtos, preserve_user=True)
         if changed:
             rep.gen_files.append((config_file, config_text,
                                   '同步 FatFS 裸机/FreeRTOS 可重入配置'))
@@ -4074,7 +4326,7 @@ def do_fatfs(proj, opts, rep):
         config_text, _changed = patch_fatfs_config(config_text, use_rtos)
         rep.gen_files.append((config_file, config_text,
                               '由官方模板生成 ffconf.h（%s模式）' %
-                              ('FreeRTOS/CMSIS-V2' if use_rtos else '裸机')))
+                              ('RTOS' if use_rtos else '裸机')))
 
     proj.add_include_path(rel_or_abs(project_fatfs, proj.dir), rep)
     proj.add_include_path(rel_or_abs(config_dir, proj.dir), rep)
@@ -4129,7 +4381,9 @@ def do_fatfs(proj, opts, rep):
                            [project_root / 'Core' / 'Src' / 'main.c', proj.dir / 'main.c'])
         main_c = next((p for p in main_candidates if p.is_file() or
                       os.path.normcase(str(p.resolve())) in getattr(proj, '_planned_generated_files', {})), None)
-        if main_c:
+        if project_profile(proj) == 'stm32-spl':
+            _plan_spl_component_entry(proj, rep, 'fatfs.h', 'MX_FATFS_Init();')
+        elif main_c:
             main_text = _planned_text(proj, main_c)
             new_main, changed = (_patch_component_init(main_text, 'fatfs.h', 'MX_FATFS_Init();', True)
                                  if use_rtthread else patch_main_fatfs_init(main_text))
@@ -4142,11 +4396,14 @@ def do_fatfs(proj, opts, rep):
         else:
             rep.warnings.append('未找到 main.c，请手动调用 MX_FATFS_Init()')
 
-    mode_text = 'FreeRTOS + CMSIS-RTOS2（线程安全）' if use_rtos else '裸机'
+    mode_text = ('RT-Thread' if use_rtthread else 'FreeRTOS 原生系统层' if use_native else
+                 'FreeRTOS + CMSIS-RTOS2（线程安全）') if use_rtos else '裸机'
     rep.notes.append('FatFS 运行模式: %s；系统层: %s' % (mode_text, system_name))
     rep.notes.append('ffconf.h: %s' % config_file)
     rep.notes.append('必须在 user_diskio.c 中接入你的 SDIO/SPI Flash/USB 存储读写函数')
     rep.notes.append('底层驱动就绪后调用 f_mount(&USERFatFS, USERPath, 1) 挂载文件系统')
+    rep.notes.append('文件读写前核对主栈/任务栈预算：FIL、局部缓冲和 LFN 会占栈；'
+                     '已有 ffconf.h 的超时与 RTC 设置保持不变。')
 
 
 # ===========================================================================
@@ -4267,6 +4524,8 @@ def _plan_managed_config(path, desired, managed_names, description, rep):
         if name in wanted:
             replacement = '#define %-31s %s\n' % (name, wanted[name])
             if match:
+                if _defined_values(match.group(0)).get(name) == wanted[name]:
+                    continue  # Preserve existing spacing when the value agrees.
                 if match.group(0).replace('\r\n', '\n') != replacement:
                     updated = updated[:match.start()] + replacement + updated[match.end():]
                     changed_names.append(name)
@@ -4873,6 +5132,14 @@ def do_cmsis_dsp(proj, opts, rep):
             return
         raise ToolError('未找到 CMSIS-DSP；可用 --cmsis-dsp auto 自动下载')
     requested = Path(requested).resolve()
+    if project_profile(proj) == 'stm32-spl':
+        # Recent DSP headers pull CMSIS compiler intrinsics into application
+        # files too. Mixing them with SPL-era Core headers causes redefinitions.
+        for name in ('arm_math.h', 'arm_math_types.h'):
+            header = requested / 'Include' / name
+            if header.is_file() and re.search(r'#\s*include\s+[<"]cmsis_compiler\.h[>"]', read_source_text(header)):
+                validate_spl_cmsis(proj, read_source_text, 'CMSIS-DSP')
+                break
     root, project_root = plan_project_library_copy(
         proj, requested, 'CMSIS-DSP', locate_cmsis_dsp_root, rep)
     root, project_root = Path(root).resolve(), Path(project_root).resolve()
@@ -4892,6 +5159,18 @@ def do_cmsis_dsp(proj, opts, rep):
             sources.append(source)
     if not sources:
         raise ToolError('CMSIS-DSP 至少要选择一个算法模块')
+    compatible = [p for p in available if allow_f16 or not p.stem.lower().endswith('f16')]
+    # Existing enabled modules count only when available in EVERY selected
+    # Target; an unrelated Debug-only or disabled file cannot satisfy Release.
+    enabled_sets = [set(active_sources(argparse.Namespace(targets=[t], dir=proj.dir)))
+                    for t in proj.targets]
+    existing = [p for p in compatible if enabled_sets and
+                all((project_root / p.relative_to(root)).resolve() in paths for paths in enabled_sets)]
+    dependencies = missing_dsp_modules(root, compatible, list(set(sources + existing)), read_source_text)
+    if dependencies:
+        raise ToolError('CMSIS-DSP 所选模块还依赖 / also select: ' +
+                        ', '.join(str(p.relative_to(root)).replace('\\', '/') for p in dependencies) +
+                        '。未自动勾回已取消文件；条件编译分支按保守规则检查。')
     for source in sources:
         target = project_root / source.relative_to(root)
         group = 'CMSIS-DSP/' + source.parent.name
@@ -4946,6 +5225,8 @@ typedef enum {
 } RTOS_GuardId;
 
 int RTOS_PeripheralGuard_Init(void);
+/* timeout_ms: 0 = try once, UINT32_MAX = wait forever. Finite values round
+ * up to ticks and saturate below the RTOS forever sentinel; tick phase applies. */
 int RTOS_PeripheralGuard_Lock(RTOS_GuardId id, uint32_t timeout_ms);
 void RTOS_PeripheralGuard_Unlock(RTOS_GuardId id);
 
@@ -4995,8 +5276,17 @@ int RTOS_PeripheralGuard_Init(void)
 
 int RTOS_PeripheralGuard_Lock(RTOS_GuardId id, uint32_t timeout_ms)
 {
-    uint32_t timeout = (timeout_ms == UINT32_MAX) ? osWaitForever : timeout_ms;
+    uint32_t timeout, frequency;
+    uint64_t ticks;
     if ((uint32_t)id >= (uint32_t)RTOS_GUARD_COUNT || s_guards[id] == NULL) return -1;
+    if (timeout_ms == UINT32_MAX) timeout = osWaitForever;
+    else if (timeout_ms == 0U) timeout = 0U;
+    else {
+        frequency = osKernelGetTickFreq();
+        if (frequency == 0U) return -1;
+        ticks = ((uint64_t)timeout_ms * frequency + 999U) / 1000U;
+        timeout = ticks >= osWaitForever ? osWaitForever - 1U : (uint32_t)ticks;
+    }
     return osMutexAcquire(s_guards[id], timeout) == osOK ? 0 : -1;
 }
 
@@ -5024,8 +5314,14 @@ int RTOS_PeripheralGuard_Init(void)
 
 int RTOS_PeripheralGuard_Lock(RTOS_GuardId id, uint32_t timeout_ms)
 {
-    TickType_t timeout = (timeout_ms == UINT32_MAX) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+    TickType_t timeout;
+    uint64_t ticks;
     if ((uint32_t)id >= (uint32_t)RTOS_GUARD_COUNT || s_guards[id] == NULL) return -1;
+    if (timeout_ms == UINT32_MAX) timeout = portMAX_DELAY;
+    else {
+        ticks = ((uint64_t)timeout_ms * configTICK_RATE_HZ + 999U) / 1000U;
+        timeout = ticks >= portMAX_DELAY ? (TickType_t)(portMAX_DELAY - 1U) : (TickType_t)ticks;
+    }
     return xSemaphoreTake(s_guards[id], timeout) == pdTRUE ? 0 : -1;
 }
 
@@ -5035,9 +5331,11 @@ void RTOS_PeripheralGuard_Unlock(RTOS_GuardId id)
         (void)xSemaphoreGive(s_guards[id]);
 }
 '''
-    source = ('/* FreeRTOS peripheral guard generated by keil_port_tool.py.\n'
-              ' * KPS_USER_ACTION / 用户接入：在自己的 HAL 调用处配对 Lock/Unlock。\n'
+    source = ('/* RTOS peripheral guard generated by keil_port_tool.py.\n'
+              ' * KPS_USER_ACTION / 用户接入：在自己的 HAL/SPL/LL 驱动调用处配对 Lock/Unlock。\n'
               ' * Check lock results; release on every exit. No blocking lock in an ISR.\n'
+              ' * Budget task priorities/CPU load and measure lock wait/hold time.\n'
+              ' * 高负载 GUI 等任务可能延迟持锁线程；先排查调度，不要盲目增大超时。\n'
               ' * DMA 事务必须保护到完成；模板不自动绑定句柄或修改已有 HAL 调用。\n'
               ' * See docs/POST-PORTING.en.md / docs/POST-PORTING.zh-CN.md (Guards). */\n'
               '#include "rtos_peripheral_guard.h"\n' + body)
@@ -5089,15 +5387,15 @@ def do_rtos_guard(proj, opts, rep):
     if not inc_dir.is_dir():
         inc_dir = src_dir
     guard_h, guard_c = inc_dir / 'rtos_peripheral_guard.h', src_dir / 'rtos_peripheral_guard.c'
-    _plan_owned_template(guard_h, header, 'RTOS_PERIPHERAL_GUARD_H', 'FreeRTOS 外设锁头文件', rep)
+    _plan_owned_template(guard_h, header, 'RTOS_PERIPHERAL_GUARD_H', 'RTOS 外设锁头文件', rep)
     _plan_owned_template(guard_c, source, 'generated by keil_port_tool.py',
-                         'FreeRTOS 外设锁实现', rep)
+                         'RTOS 外设锁实现', rep)
     group = 'RTThread/ThreadSafe' if use_rtthread else 'FreeRTOS/ThreadSafe'
     if proj.add_file(group, guard_c.name, 1, rel_or_abs(guard_c, proj.dir)):
         rep.files.append((group, guard_c.name))
     proj.add_include_path(rel_or_abs(inc_dir, proj.dir), rep)
 
-    app_candidates = ((content_root / 'RTThread/App/rtthread_app.c',) if use_rtthread else ()) + (content_root / 'Core' / 'Src' / 'freertos_app.c',
+    app_candidates = ((content_root / 'RTThread/App/rtthread_app.c',) if use_rtthread else ()) + (content_root / 'KPS/FreeRTOS/App/freertos_app.c', content_root / 'Core' / 'Src' / 'freertos_app.c',
                       content_root / 'Core' / 'Src' / 'freertos.c',
                       proj.dir / 'Application' / 'freertos_app.c')
     app = next((p for p in app_candidates if p.is_file() or
@@ -5107,14 +5405,14 @@ def do_rtos_guard(proj, opts, rep):
                              '(void)RTOS_PeripheralGuard_Init();', True) if use_rtthread else
                              patch_guard_init(_planned_text(proj, app)))
         if changed:
-            rep.gen_files.append((app, new_text, '自动初始化 FreeRTOS 外设锁'))
+            rep.gen_files.append((app, new_text, '自动初始化 RTOS 外设锁'))
         elif 'RTOS_PeripheralGuard_Init();' not in _planned_text(proj, app):
-            rep.warnings.append('未能自动修改 MX_FREERTOS_Init()，请手动调用 RTOS_PeripheralGuard_Init()')
+            rep.warnings.append('未能自动修改 RTOS 任务入口，请手动调用 RTOS_PeripheralGuard_Init()')
     else:
-        rep.warnings.append('未找到 FreeRTOS 应用入口，请在调度器启动前调用 RTOS_PeripheralGuard_Init()')
+        rep.warnings.append('未找到 RTOS 应用入口；RT-Thread 在首个线程、FreeRTOS 在创建业务任务前调用 RTOS_PeripheralGuard_Init()')
     rep.notes.append('已生成外设锁: %s（%s API）' %
-                     (', '.join(resources), 'CMSIS-RTOS2' if use_cmsis2 else '原生 FreeRTOS'))
-    rep.notes.append('在 HAL_UART/SPI/I2C 或 Flash 操作前 Lock，完成后 Unlock')
+                     (', '.join(resources), 'RT-Thread' if use_rtthread else 'CMSIS-RTOS2' if use_cmsis2 else '原生 FreeRTOS'))
+    rep.notes.append('在 UART/SPI/I2C 或 Flash 驱动操作前 Lock，完成后 Unlock；不限定 HAL')
 
 
 # ===========================================================================
@@ -5288,7 +5586,8 @@ def lwip_port_templates(use_rtos, enabled_apps, ipv6, memory=None, use_rtthread=
 
 /* Generated by keil_port_tool.py; tune pool sizes for the product. */
 #define NO_SYS                          %(no_sys)d
-#define SYS_LIGHTWEIGHT_PROT            1
+/* NO_SYS: one main-loop owner. IRQs only queue frames; never call lwIP there. */
+#define SYS_LIGHTWEIGHT_PROT            %(rtos)d
 #define MEM_ALIGNMENT                   4
 #define MEM_SIZE                        (%(heap_kb)dU * 1024U)
 #define MEMP_NUM_PBUF                   %(pbufs)d
@@ -5398,7 +5697,7 @@ typedef UBaseType_t sys_prot_t;
 #include "lwip/stats.h"
 
 void sys_init(void) {}
-u32_t sys_now(void) { return (u32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS); }
+u32_t sys_now(void) { return (u32_t)(((uint64_t)xTaskGetTickCount() * 1000U) / configTICK_RATE_HZ); }
 u32_t sys_jiffies(void) { return (u32_t)xTaskGetTickCount(); }
 
 err_t sys_sem_new(sys_sem_t *sem, u8_t count)
@@ -5500,8 +5799,10 @@ struct pbuf *LwIP_Platform_Input(struct netif *netif);
     rtos_task = '''\
 static void LwIP_InputTask(void *argument)
 {
+    TickType_t delay_ticks = pdMS_TO_TICKS(1U);
     (void)argument;
-    for (;;) { LwIP_Poll(); vTaskDelay(pdMS_TO_TICKS(1U)); }
+    if (delay_ticks == 0U) delay_ticks = 1U;
+    for (;;) { LwIP_Poll(); vTaskDelay(delay_ticks); }
 }
 ''' if use_rtos else ''
     init_body = ('''\
@@ -5664,9 +5965,11 @@ void NetworkDriver_GetMac(uint8_t mac[6]);
  * Init/Send: 0 means success. Receive: frame bytes, 0 when idle; enforce capacity.
  * Send must finish/copy before return because the shared TX buffer is reused.
  * 核对 PHY 地址/复位/RMII 时钟、MAC 地址、DMA；补齐断连重连 link 状态。
+ * MAC must accept broadcast frames for ARP; vendor SPL defaults may reject them.
+ * 广播过滤会导致 Link 正常但 ARP/Ping 不通；另核对 MDIO 与 UART 等引脚冲突。
  * lwip_port.c/LwIP_AddNetif: choose static IPv4 or DHCP; no DHCP on a plain PC link.
  * See docs/POST-PORTING.en.md / docs/POST-PORTING.zh-CN.md (LwIP).
- * Implement the four weak NetworkDriver_* hooks with your HAL/SPI driver.
+ * Implement the four weak NetworkDriver_* hooks with your HAL/SPL/SPI driver.
  */
 #include "lwip_netif_driver.h"
 #include "lwip_port.h"
@@ -5728,6 +6031,51 @@ NET_DRIVER_WEAK void NetworkDriver_GetMac(uint8_t mac[6])
 { static const uint8_t fallback[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01}; memcpy(mac, fallback, 6); }
 ''' % {'label': label}
     return header, source, label
+
+
+def _plan_spl_component_entry(proj, rep, header, call, loop_call=None):
+    """Resolve the actual selected SPL entry, including earlier planned RTOS files."""
+    if len(proj.targets) != len(proj.all_targets):
+        raise ToolError('SPL 组件入口可能被多个 Target 共用；请选择全部 Target 或使用独立工程。')
+    content = project_content_root(proj)
+    task = None
+    if project_uses_rtthread(proj):
+        candidates = (content / 'RTThread/App/rtthread_app.c',)
+        task = 'RTThread_DefaultTask'
+    elif project_uses_freertos(proj):
+        candidates = (content / 'KPS/FreeRTOS/App/freertos_app.c',
+                      content / 'Core/Src/freertos_app.c',
+                      proj.dir / 'Application/freertos_app.c')
+        task = 'StartDefaultTask'
+    if task:
+        if loop_call:
+            raise ToolError('SPL RTOS 工程请选择组件 RTOS 模式；不能保证默认任务轮询周期。')
+        enabled = set(active_sources(proj))
+        candidates = [p.resolve() for p in candidates if p.resolve() in enabled]
+        if len(candidates) != 1:
+            raise ToolError('SPL 组件接入需要唯一的已启用默认任务源文件；'
+                            '请保留工具应用层或手动集成。 / unique enabled RTOS application required')
+        entry = candidates[0]
+        text = _planned_text(proj, entry)
+        # Do not attach to a task whose creation was removed by the user.
+        code = _c_code(text)
+        creator = (r'rt_thread_init\s*\([^;]*\bRTThread_DefaultTask\b' if task == 'RTThread_DefaultTask'
+                   else r'(?:xTaskCreate|osThreadNew)\s*\(\s*StartDefaultTask\b')
+        if not re.search(creator, code):
+            raise ToolError('SPL 默认任务未创建，拒绝把组件放入未运行的任务。 / default task not created')
+    else:
+        # Middleware references just planned above do not exist on disk yet.
+        # Search the selected input project, not our newly added SDK/templates.
+        input_proj = copy.copy(proj)
+        original = proj._initial_root.findall('Targets/Target') or proj._initial_root.findall('Target')
+        input_proj.targets = [t for t in original if t.findtext('TargetName', '') in proj.target_names()]
+        entry, text = discover_entry(input_proj, lambda p: _planned_text(proj, p))
+    result = patch_spl_component(text, header, call, loop_call, task).require_safe(str(entry))
+    if result.changed:
+        rep.gen_files.append((entry, result.text, 'SPL 组件初始化 / ' + call))
+        rep.spl_entry_edits[os.path.normcase(str(entry.resolve()))] = (header, call, loop_call, task)
+    rep.notes.append('SPL 自动接入 %s: %s%s' %
+                     (task or 'main', entry, '；循环调用 ' + loop_call if loop_call else ''))
 
 
 def _patch_component_init(text, header, call, prefer_rtos=False):
@@ -5842,6 +6190,16 @@ def do_lwip(proj, opts, rep):
     memory = embedded_memory_profile(proj)
     opts_h, cc_h, sys_h, sys_c, port_h, port_c = lwip_port_templates(
         use_rtos, enabled_apps, ipv6_enabled, memory, use_rtthread)
+    if not use_rtos and project_profile(proj) == 'stm32-spl':
+        port_c += '''
+/* KPS_USER_ACTION / 用户接入：提供持续递增的毫秒时基，不可返回常数。
+ * Use a board TIM/SysTick counter. This tool does not take ownership of a timer.
+ * Deliberately no fake default: implement this hook before linking/running. */
+extern uint32_t LwIP_Platform_Millis(void);
+LWIP_PORT_WEAK u32_t sys_now(void) { return LwIP_Platform_Millis(); }
+'''
+        rep.warnings.append('SPL 裸机 LwIP: 请实现 LwIP_Platform_Millis() 毫秒时基；'
+                            '工具不会抢占现有 SysTick/TIM，也不会用常数伪造时间。')
     driver_h, driver_c, driver_label = lwip_driver_templates(driver)
     content = project_content_root(proj)
     cfg = content / 'Config' / 'LwIP'
@@ -5861,7 +6219,7 @@ def do_lwip(proj, opts, rep):
         generated.extend(((cfg / 'arch' / 'sys_arch.h', sys_h, 'LwIP %s 类型适配' % backend_name),
                           (src_dir / 'sys_arch.c', sys_c, 'LwIP %s 系统层' % backend_name)))
     lwip_managed = (
-        'NO_SYS', 'LWIP_IPV6', 'LWIP_IGMP', 'LWIP_NETCONN', 'LWIP_SOCKET',
+        'NO_SYS', 'SYS_LIGHTWEIGHT_PROT', 'LWIP_IPV6', 'LWIP_IGMP', 'LWIP_NETCONN', 'LWIP_SOCKET',
         'LWIP_NETIF_API', 'LWIP_HTTPD', 'LWIP_MQTT', 'LWIP_MDNS_RESPONDER',
         'LWIP_SNTP', 'LWIP_NETBIOS_RESPOND_NAME_QUERY', 'LWIP_TFTP',
         'LWIP_NUM_NETIF_CLIENT_DATA', 'LWIP_ERRNO_STDINCLUDE', 'LWIP_ERRNO_INCLUDE',
@@ -5885,7 +6243,7 @@ def do_lwip(proj, opts, rep):
     proj.add_include_path(rel_or_abs(inc_dir, proj.dir), rep)
 
     if use_rtos:
-        candidates = ((content / 'RTThread/App/rtthread_app.c',) if use_rtthread else ()) + (content / 'Core' / 'Src' / 'freertos_app.c',
+        candidates = ((content / 'RTThread/App/rtthread_app.c',) if use_rtthread else ()) + (content / 'KPS/FreeRTOS/App/freertos_app.c', content / 'Core' / 'Src' / 'freertos_app.c',
                       content / 'Core' / 'Src' / 'freertos.c',
                       proj.dir / 'Application' / 'freertos_app.c',
                       content / 'Core' / 'Src' / 'main.c', proj.dir / 'main.c')
@@ -5893,7 +6251,10 @@ def do_lwip(proj, opts, rep):
         candidates = (content / 'Core' / 'Src' / 'main.c', proj.dir / 'main.c')
     entry = next((p for p in candidates if p.is_file() or
                   os.path.normcase(str(p.resolve())) in getattr(proj, '_planned_generated_files', {})), None)
-    if entry:
+    if project_profile(proj) == 'stm32-spl':
+        _plan_spl_component_entry(proj, rep, 'lwip_port.h', 'LwIP_AppInit();',
+                                  None if use_rtos else 'LwIP_Poll();')
+    elif entry:
         patched, changed = _patch_component_init(_planned_text(proj, entry), 'lwip_port.h',
                                                  'LwIP_AppInit();', use_rtos)
         if not use_rtos:
@@ -5993,6 +6354,30 @@ def tinyusb_timebase_template(use_rtos=False, use_rtthread=False, use_hal=False)
     return ('\n/* SDK >=0.18 timebase. Override this weak function if using a different clock.\n'
             ' * RTOS tick must be running before starting USB enumeration. */\n' + declarations +
             'TUSB_APP_WEAK uint32_t tusb_time_millis_api(void)\n{\n    return ' + expression + ';\n}\n')
+
+
+def tinyusb_spl_device_header(device):
+    """F405/407/415/417 constants missing from the old SPL device header.
+
+    Values match ST's stm32f407xx.h, not a blanket STM32F4 assumption. Preserve
+    newer headers, but stop compilation if an existing definition disagrees.
+    """
+    if not str(device).upper().startswith(('STM32F405', 'STM32F407', 'STM32F415', 'STM32F417')):
+        raise ToolError('TinyUSB SPL 自动兼容头当前仅覆盖 STM32F405/407/415/417；'
+                        '其他芯片需核对 USB 控制器寄存器和 FIFO，不能套用 F407 参数。')
+    lines = ['/* TinyUSB SPL device bridge generated by keil_port_tool.py. */',
+             '#ifndef KPS_SPL_USB_DEVICE_H', '#define KPS_SPL_USB_DEVICE_H',
+             '#include "stm32f4xx.h"']
+    for name, value in (('USB_OTG_FS_PERIPH_BASE', '0x50000000UL'),
+                        ('USB_OTG_HS_PERIPH_BASE', '0x40040000UL'),
+                        ('USB_OTG_FS_MAX_IN_ENDPOINTS', '4U'),
+                        ('USB_OTG_HS_MAX_IN_ENDPOINTS', '6U'),
+                        ('USB_OTG_FS_TOTAL_FIFO_SIZE', '1280U'),
+                        ('USB_OTG_HS_TOTAL_FIFO_SIZE', '4096U')):
+        lines.extend(('#ifndef ' + name, '#define %s %s' % (name, value),
+                      '#elif %s != %s' % (name, value),
+                      '#error "SPL USB device constants disagree: %s"' % name, '#endif'))
+    return '\n'.join(lines + ['#endif', ''])
 
 
 def tinyusb_source_files(root, proj, mode, classes):
@@ -6260,6 +6645,9 @@ TUSB_APP_WEAK void TinyUSB_Platform_Init(void)
     /* Configure the USB clock, GPIO and IRQ for the selected controller.
      * TinyUSB owns this controller: do NOT also start HAL_PCD / USB_DEVICE.
      * IRQ handler must forward to tud_int_handler()/tuh_int_handler().
+     * RT-Thread: bracket that IRQ handler with rt_interrupt_enter() and
+     * rt_interrupt_leave(), unless the BSP already supplies that bracket.
+     * RT-Thread 中断入口/出口须成对登记；已有 BSP 包装时不要重复调用。
      * FreeRTOS: choose an IRQ priority permitted by
      * configMAX_SYSCALL_INTERRUPT_PRIORITY before enabling the interrupt.
      * Configure VBUS sensing to match the actual board wiring. */
@@ -6567,6 +6955,14 @@ def do_tinyusb(proj, opts, rep):
                                 ' / Implement TinyUSB_Platform_Millis() before building.')
     content = project_content_root(proj)
     cfg = content / 'Config' / 'TinyUSB'
+    if project_profile(proj) == 'stm32-spl':
+        bridge = tinyusb_spl_device_header(proj.device())
+        config = '#include "kps_spl_usb_device.h"\n' + config
+        _plan_owned_template(cfg / 'kps_spl_usb_device.h', bridge,
+                             'generated by keil_port_tool.py', 'TinyUSB SPL USB 控制器兼容头', rep)
+        existing_config = cfg / 'tusb_config.h'
+        if existing_config.is_file() and 'kps_spl_usb_device.h' not in read_source_text(existing_config):
+            raise ToolError('已有 SPL tusb_config.h 未接入 kps_spl_usb_device.h；请核对后添加 include，未覆盖用户配置。')
     src_dir, inc_dir = content / 'Core' / 'Src', content / 'Core' / 'Inc'
     if not src_dir.is_dir():
         src_dir = content / 'Application' / 'TinyUSB'
@@ -6598,12 +6994,15 @@ def do_tinyusb(proj, opts, rep):
             rep.files.append(('TinyUSB/Application', path.name))
     proj.add_include_path(rel_or_abs(cfg, proj.dir), rep)
     proj.add_include_path(rel_or_abs(inc_dir, proj.dir), rep)
-    candidates = ((content / 'RTThread/App/rtthread_app.c',) if use_rtthread else ()) + (content / 'Core' / 'Src' / 'freertos_app.c',
+    candidates = ((content / 'RTThread/App/rtthread_app.c',) if use_rtthread else ()) + (content / 'KPS/FreeRTOS/App/freertos_app.c', content / 'Core' / 'Src' / 'freertos_app.c',
                   content / 'Core' / 'Src' / 'freertos.c', content / 'Core' / 'Src' / 'main.c',
                   proj.dir / 'Application' / 'freertos_app.c', proj.dir / 'main.c')
     entry = next((p for p in candidates if p.is_file() or
                   os.path.normcase(str(p.resolve())) in getattr(proj, '_planned_generated_files', {})), None)
-    if entry:
+    if project_profile(proj) == 'stm32-spl':
+        _plan_spl_component_entry(proj, rep, 'tinyusb_app.h', 'TinyUSB_AppInit();',
+                                  None if use_rtos else 'TinyUSB_AppTask();')
+    elif entry:
         patched, changed = _patch_component_init(_planned_text(proj, entry), 'tinyusb_app.h',
                                                  'TinyUSB_AppInit();', use_rtos)
         if not use_rtos:
@@ -6687,8 +7086,8 @@ class ProjectTransaction:
             return
         if path.is_file():
             dst = self.before / Path(rel)
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(path), str(dst))
+            filesystem_path(dst.parent).mkdir(parents=True, exist_ok=True)
+            copy_file(path, dst)
             self.meta['snapshots'].append({'path': rel, 'backup': str(Path('before') / rel)})
         elif not path.exists() and rel not in self.meta['created_files']:
             self.meta['created_files'].append(rel)
@@ -6706,8 +7105,8 @@ class ProjectTransaction:
         if path.is_dir():
             backup_rel = Path('before_dirs') / rel
             destination = self.dir / backup_rel
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(str(path), str(destination))
+            filesystem_path(destination.parent).mkdir(parents=True, exist_ok=True)
+            copy_tree(path, destination)
             self.meta['dir_snapshots'].append({'path': rel, 'backup': str(backup_rel)})
 
     def save_meta(self, status=None, error=None):
@@ -6728,21 +7127,21 @@ class ProjectTransaction:
         for rel in sorted(self.meta['created_dirs'], key=len, reverse=True):
             path = self.root / Path(rel)
             if path.is_dir() and path != self.root and self.root in path.parents:
-                shutil.rmtree(str(path))
+                remove_tree(path)
         for item in self.meta['snapshots']:
             source = self.dir / Path(item['backup'])
             destination = self.root / Path(item['path'])
             if source.is_file():
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(source), str(destination))
+                filesystem_path(destination.parent).mkdir(parents=True, exist_ok=True)
+                copy_file(source, destination)
         for item in self.meta.get('dir_snapshots', []):
             source = self.dir / Path(item['backup'])
             destination = self.root / Path(item['path'])
             if source.is_dir():
                 if destination.is_dir():
-                    shutil.rmtree(str(destination))
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(str(source), str(destination))
+                    remove_tree(destination)
+                filesystem_path(destination.parent).mkdir(parents=True, exist_ok=True)
+                copy_tree(source, destination)
         self.save_meta('failed_rolled_back', error)
 
 
@@ -6938,6 +7337,19 @@ def update_component_manifest(proj, reports, transaction):
             'source_edits_complete': (previous.get('source_edits_complete', 'source_edits' in previous)
                                       if previous else True),
         }
+        if rep.key == 'add_files':
+            # Intentional reference removal is Target-specific: regeneration
+            # recovery must not put an explicitly removed include back.
+            per_target = {}
+            for target in proj.all_targets:
+                name = target.findtext('TargetName', '')
+                present = {proj.norm_file(p.strip()) for c in proj._target_cads(target)
+                           for p in (c.findtext('VariousControls/IncludePath', '') or '').split(';') if p.strip()}
+                candidates = list(previous.get('include_paths_by_target', {}).get(name, previous.get('include_paths', [])))
+                if name in proj.target_names():
+                    candidates += list(rep.inc)
+                per_target[name] = list(dict.fromkeys(p for p in candidates if proj.norm_file(p) in present))
+            manifest['components'][rep.key]['include_paths_by_target'] = per_target
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n',
                              encoding='utf-8')
 
@@ -6959,9 +7371,13 @@ def build_diff_preview(proj, reports, max_lines=1800):
             latest[os.path.normcase(str(Path(path).resolve()))] = (Path(path), content, desc)
     for path, content, desc in latest.values():
         before = read_source_text(path) if path.is_file() else ''
+        # Source writes restore the original newline format. Compare logical
+        # lines so CRLF input / LF patch text does not produce a whole-file diff.
+        before = before.replace('\r\n', '\n').replace('\r', '\n')
+        after = str(content).replace('\r\n', '\n').replace('\r', '\n')
         blocks.append('\n### %s: %s\n' % (desc, path))
         blocks.extend(difflib.unified_diff(
-            before.splitlines(True), str(content).splitlines(True),
+            before.splitlines(True), after.splitlines(True),
             fromfile=str(path) + (' (修改前)' if before else ' (新文件)'),
             tofile=str(path) + ' (修改后)'))
     for rep in reports:
@@ -6980,7 +7396,16 @@ def build_diff_preview(proj, reports, max_lines=1800):
 # ===========================================================================
 # 任务调度: 收集报告 -> 确认 -> 事务写入
 # ===========================================================================
-TASK_FUNCS = {'add_files': do_add_files, 'freertos': do_freertos, 'rtthread': do_rtthread,
+def do_device_drivers(proj, opts, rep):
+    plan_drivers(SimpleNamespace(**globals()), proj, opts, rep)
+
+
+def remove_project_references(proj, selections, **kwargs):
+    return _remove_references(SimpleNamespace(**globals()), proj, selections, **kwargs)
+
+
+TASK_FUNCS = {'device_drivers': do_device_drivers,
+              'add_files': do_add_files, 'freertos': do_freertos, 'rtthread': do_rtthread,
               'lvgl': do_lvgl, 'fatfs': do_fatfs,
               'segger_rtt': do_segger_rtt, 'littlefs': do_littlefs,
               'cmsis_dsp': do_cmsis_dsp, 'rtos_guard': do_rtos_guard,
@@ -6992,7 +7417,20 @@ def run_tasks(proj, tasks, opts):
     if ('rtthread' in tasks and ('freertos' in tasks or project_uses_freertos(proj)) or
             'freertos' in tasks and project_uses_rtthread(proj)):
         raise ToolError('FreeRTOS 与 RT-Thread 不能同时安装到同一工程；请使用独立工程副本')
+    manifest_guard = _state_dir(proj) / 'manifest.json'
+    manifest_before = manifest_guard.read_bytes() if manifest_guard.exists() else None
     proj._planning_failed = False
+    if any(task != 'add_files' for task in tasks):
+        coexistence = inspect_coexistence(proj, read_source_text, requested=tasks)
+        for item in coexistence:
+            log('[%s] %s: %s\n  %s' % (item['severity'], item['code'],
+                item['message']['en' if _UI_LANGUAGE == 'en' else 'zh-CN'],
+                ', '.join(e.get('file', '') for e in item['evidence'])))
+        if any(item['severity'] == 'error' for item in coexistence):
+            proj._planning_failed = True
+            warn('工程归属/重新生成检查未通过；未下载、未复制、未写入。请运行工程体检并核对冲突。 '
+                 'Ownership/regeneration check failed; no files written. Run project health check.')
+            return False
     original_root = copy.deepcopy(proj.root)
     original_dirty = proj.dirty
     original_targets = proj.target_names()
@@ -7042,7 +7480,10 @@ def run_tasks(proj, tasks, opts):
                 rel = _relative_project_path(proj, path)
                 if rel is None or rel.startswith('../'):
                     raise ToolError('源码补丁超出工程边界: %s' % path)
-                rep.source_edits.append({'path': rel, 'hunks': _edit_hunks(before, content)})
+                entry_spec = rep.spl_entry_edits.get(key)
+                hunks = (spl_insertion_hunks(before, content, *entry_spec) if entry_spec
+                         else _edit_hunks(before, content))
+                rep.source_edits.append({'path': rel, 'hunks': hunks})
             planned[key] = content
         proj._planned_generated_files = planned
 
@@ -7075,6 +7516,8 @@ def run_tasks(proj, tasks, opts):
     if not proj.dirty and not any(r.copy_trees or r.gen_files or r.obsolete_files for r in reports):
         info('没有需要写入的更改, 工程保持原样。')
         return False
+    guarded_files = {path: path.read_bytes() if path.exists() else None
+                     for rep in reports for path, _content, _desc in rep.gen_files}
     diff_text = build_diff_preview(proj, reports)
     diff_file = getattr(opts, 'diff_file', None)
     if diff_file:
@@ -7097,6 +7540,13 @@ def run_tasks(proj, tasks, opts):
             info('已取消, 未写入任何文件。')
             return False
 
+    if proj.path.read_bytes() != proj.original_bytes:
+        raise ToolError('预览期间工程已被其他程序修改，请重新加载 / Project changed; reload before applying')
+    if (manifest_guard.read_bytes() if manifest_guard.exists() else None) != manifest_before:
+        raise ToolError('组件记录已变化，请重新加载 / Component manifest changed; reload')
+    for path, before in guarded_files.items():
+        if (path.read_bytes() if path.exists() else None) != before:
+            raise ToolError('预览期间文件已变化，未覆盖 / File changed during preview: %s' % path)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     tx = prepare_transaction(proj, reports, 'install', tasks)
     try:
@@ -7108,7 +7558,7 @@ def run_tasks(proj, tasks, opts):
                 if destination.exists():
                     log('[已跳过] 工程内目录已存在，不覆盖: %s' % destination)
                     continue
-                shutil.copytree(str(source), str(destination),
+                copy_tree(source, destination,
                                 ignore=shutil.ignore_patterns('.git', '__pycache__'))
                 log('[已复制] %s: %s -> %s' % (desc, source, destination))
             for path, desc in rep.obsolete_files:
@@ -7123,7 +7573,7 @@ def run_tasks(proj, tasks, opts):
                 if path.is_file():
                     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                     file_bak = path.with_name(path.name + '.bak_' + ts)
-                    shutil.copy2(str(path), str(file_bak))
+                    copy_file(path, file_bak)
                     log('[备份] 原文件已备份到: %s' % file_bak)
                 path.write_bytes(encode_preserving_format(path, content))
                 log('[已生成] %s -> %s' % (desc, path))
@@ -7146,6 +7596,113 @@ def installed_components(proj):
     manifest = _load_json(_state_dir(proj) / 'manifest.json',
                           {'version': MANIFEST_VERSION, 'components': {}})
     return manifest.get('components', {})
+
+
+def recover_cubemx_project(proj, yes=False, dry_run=False, preview_callback=None):
+    """Restore only recorded integration, never an old full project or user template."""
+    working = KeilProject(proj.path)
+    working.select_targets(proj.target_names())
+    rep = Report('project_settings')
+    plan_recovery(working, read_source_text, rep, PROJECT_FILE_TYPES)
+    if not working.dirty and not rep.gen_files:
+        info('组件接入完整，无需恢复 / Integration intact; no recovery needed')
+        return False
+    diff = build_diff_preview(working, [rep], None)
+    log(diff)
+    if dry_run:
+        info('DRY-RUN: 未写入 / No files written')
+        return False
+    if preview_callback:
+        if not preview_callback(diff):
+            return False
+    elif not yes and not ask_yn('恢复以上已记录的组件接入？不覆盖新引脚配置 / Restore recorded integration?', False):
+        return False
+    # Recheck preview-time edits; never overwrite a file changed while dialog open.
+    expected = {p: read_source_text(p) for p, _, _ in rep.gen_files}
+    check = KeilProject(proj.path)
+    check.select_targets(proj.target_names())
+    check_rep = Report('project_settings')
+    plan_recovery(check, read_source_text, check_rep, PROJECT_FILE_TYPES)
+    if build_diff_preview(check, [check_rep], None) != diff:
+        raise ToolError('预览后工程已变化，请重新预览 / Project changed since preview')
+    tx = prepare_transaction(working, [rep], 'cubemx_recovery', tuple(installed_components(working)))
+    try:
+        for path, content, _desc in rep.gen_files:
+            if read_source_text(path) != expected[path]:
+                raise ToolError('恢复前源码已变化 / Source changed before recovery: ' + str(path))
+            path.write_bytes(encode_preserving_format(path, content))
+        if working.dirty:
+            working.save()
+        remaining = inspect_coexistence(KeilProject(working.path), read_source_text)
+        if any(i['severity'] == 'error' for i in remaining):
+            raise ToolError('写入后核对失败 / Post-write ownership verification failed')
+        # Existing ownership remains valid. Replaying it is not a second install.
+        tx.save_meta('success')
+    except Exception as error:
+        tx.rollback(error)
+        raise ToolError('恢复失败，已回滚 / Recovery rolled back: ' + str(error))
+    info('CubeMX 接入恢复完成；保留重新生成的外设配置 / Integration restored; regenerated peripherals preserved')
+    return True
+
+
+def protect_cubemx_project(proj, yes=False, dry_run=False, preview_callback=None):
+    """Opt-in migration of intact legacy source copies, without replacing edits."""
+    working = KeilProject(proj.path)
+    working.select_targets(proj.target_names())
+    rep = Report('project_settings')
+    manifest, file_copies = plan_isolation(working, read_source_text, rep)
+    if not rep.copy_trees and not file_copies:
+        info('没有需要隔离的旧目录 / No legacy copies to isolate')
+        return False
+    state = _state_dir(working) / 'manifest.json'
+    rep.gen_files.append((state, json.dumps(manifest, ensure_ascii=False, indent=2) + '\n',
+                          '更新迁移归属 / Update migrated ownership'))
+    before_hashes = {Path(p): sha256_tree(p) if Path(p).is_dir() else sha256_file(p)
+                     for p in [working.path, state] + [a for a, _, _ in rep.copy_trees] + [a for a, _ in file_copies]}
+    diff = build_diff_preview(working, [rep], None)
+    diff += ''.join('\nCOPY %s -> %s\n原文件保留为 .kps_migrated_bak / Original retained as backup\n' % pair
+                    for pair in file_copies)
+    log(diff)
+    if dry_run:
+        return False
+    if preview_callback:
+        if not preview_callback(diff): return False
+    elif not yes and not ask_yn('隔离旧组件到 KPS 目录并保留备份 / Isolate existing components?', False):
+        return False
+    for path, expected in before_hashes.items():
+        if (sha256_tree(path) if path.is_dir() else sha256_file(path)) != expected:
+            raise ToolError('预览后源码已变化，请重试 / Source changed since preview')
+    for old, new in file_copies:
+        if new.exists() or old.with_name(old.name + '.kps_migrated_bak').exists():
+            raise ToolError('目标或备份已存在，停止覆盖 / Destination or backup exists: ' + str(old))
+    tx = prepare_transaction(working, [rep], 'cubemx_isolation', tuple(manifest['components']))
+    try:
+        for old, new in file_copies:
+            tx.snapshot(old)
+            tx.snapshot(new)
+            tx.snapshot(old.with_name(old.name + '.kps_migrated_bak'))
+        tx.save_meta('prepared')
+        for source, destination, _ in rep.copy_trees:
+            copy_tree(source, destination)
+            if sha256_tree(source) != sha256_tree(destination):
+                raise ToolError('复制后校验失败 / Copy verification failed')
+        for old, new in file_copies:
+            new.parent.mkdir(parents=True, exist_ok=True)
+            copy_file(old, new)
+            if sha256_file(old) != sha256_file(new):
+                raise ToolError('任务文件校验失败 / Task copy verification failed')
+            old.replace(old.with_name(old.name + '.kps_migrated_bak'))
+        state.write_text(rep.gen_files[-1][1], encoding='utf-8')
+        working.save()
+        if any(i['severity'] == 'error' for i in inspect_coexistence(KeilProject(working.path), read_source_text)):
+            raise ToolError('迁移后归属检查失败 / Isolation post-check failed')
+        tx.save_meta('success')
+    except Exception as error:
+        tx.rollback(error)
+        raise ToolError('隔离失败，已回滚 / Isolation rolled back: ' + str(error))
+    info('旧组件已隔离到 KPS；旧库目录仍作为未引用副本保留。重新生成后请体检。 / '
+         'Components isolated; old library trees retained unreferenced. Check after regeneration.')
+    return True
 
 
 # ===========================================================================
@@ -7299,9 +7856,10 @@ def update_project_gitignore(proj, include_third_party=False):
     root = project_content_root(proj)
     path = root / '.gitignore'
     old = read_source_text(path) if path.is_file() else ''
-    entries = ['/.keil-port-tool/', '*.bak_*', '*.obsolete_bak_*']
+    entries = ['/.keil-port-tool/', '*.bak_*', '*.obsolete_bak_*', '*.kps_migrated_bak']
     if include_third_party:
         entries.append('/Middlewares/Third_Party/')
+        entries.append('/KPS/ThirdParty/')
     existing = {line.strip() for line in old.splitlines()}
     missing = [entry for entry in entries if entry not in existing]
     if not missing:
@@ -7315,7 +7873,7 @@ def update_project_gitignore(proj, include_third_party=False):
     new += '# Keil Port Studio\n' + '\n'.join(missing) + '\n'
     if path.is_file():
         backup = path.with_name(path.name + '.bak_' + datetime.now().strftime('%Y%m%d_%H%M%S'))
-        shutil.copy2(str(path), str(backup))
+        copy_file(path, backup)
         info('.gitignore 备份: %s' % backup)
     path.write_bytes(encode_preserving_format(path, new))
     info('.gitignore 已追加 %d 条规则: %s' % (len(missing), path))
@@ -7470,6 +8028,13 @@ def uninstall_component(proj, component, yes=False, preview_callback=None):
         raise ToolError('没有找到组件 %s 的安装记录；可卸载项: %s' %
                         (component, ', '.join(sorted(manifest.get('components', {}))) or '无'))
 
+    if component == 'device_drivers':
+        installed_targets = set(data.get('targets', []))
+        missing = installed_targets - set(proj.target_names())
+        if missing:
+            raise ToolError('驱动源码由多个 Target 共用，请选择全部安装 Target 后卸载 / '
+                            'Select all installed targets before uninstall: ' + ', '.join(sorted(missing)))
+
     # Validate every source reversal BEFORE mutating even the in-memory project.
     source_unpatches = _manifest_source_unpatches(proj, component, data)
 
@@ -7546,7 +8111,7 @@ def uninstall_component(proj, component, yes=False, preview_callback=None):
         for path in sorted(deletable_dirs, key=lambda p: len(str(p)), reverse=True):
             tx._rel(path)
             if path.is_dir():
-                shutil.rmtree(str(path))
+                remove_tree(path)
         if proj.dirty:
             proj.save()
         del manifest['components'][component]
@@ -7607,14 +8172,14 @@ def rollback_last_transaction(proj, yes=False, preview_callback=None):
             path = safety.root / Path(rel)
             safety._rel(path)
             if path.is_dir():
-                shutil.rmtree(str(path))
+                remove_tree(path)
         for item in original.get('snapshots', []):
             source = directory / Path(item['backup'])
             destination = safety.root / Path(item['path'])
             safety._rel(destination)
             if source.is_file():
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(source), str(destination))
+                filesystem_path(destination.parent).mkdir(parents=True, exist_ok=True)
+                copy_file(source, destination)
         original['status'] = 'rolled_back'
         (directory / 'transaction.json').write_text(
             json.dumps(original, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
@@ -8002,6 +8567,7 @@ class GitRepository:
 
 
 _UI_LANGUAGE = 'zh-CN'
+_GUI_ENTRY_REQUESTED = False
 _EN_MESSAGES = {
     '文件 / 目录': 'File / directory', '用途': 'Purpose', '目录': 'Directory',
     '尚未扫描文件': 'Not scanned',
@@ -9172,6 +9738,9 @@ class KeilPortGUI:
         base = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent)) / 'docs'
         for stem, label in (('GUI', _gt('界面使用', 'Interface')),
                             ('POST-PORTING', _gt('移植后必做', 'After porting')),
+                            ('DRIVERS', _gt('器件驱动与引用移除', 'Device drivers and removal')),
+                            ('SPL', _gt('标准库适配', 'SPL adapter')),
+                            ('CUBEMX', _gt('CubeMX 共存', 'CubeMX coexistence')),
                             ('GIT', _gt('Git 使用', 'Git workflow'))):
             view = ScrolledText(notebook, wrap='word', padx=16, pady=16, font=('Microsoft YaHei UI', 10))
             notebook.add(view, text=label)
@@ -10015,6 +10584,62 @@ class KeilPortGUI:
         if keys is not None:
             tree.apply_selection_keys(keys)
 
+    def open_project_doctor(self):
+        """Read-only backend work stays off Tk's main thread."""
+        try:
+            project = self._project()
+            report = self._background_call(inspect_project, project)
+        except Exception as error:
+            messagebox.showerror(_gt('体检失败', 'Health check failed'), str(error), parent=self.root)
+            return
+        previous_grab = self.root.grab_current()
+        win = tk.Toplevel(self.root)
+        win.title(_gt('工程体检（只读）', 'Project health check (read-only)'))
+        self._size_dialog(win, 900, 620)
+        win.transient(previous_grab or self.root)
+        # The tools panel is modal. Background work restores its grab, so
+        # this result window must take over input and return it on close.
+        # Invoking callbacks directly in tests cannot catch a missing grab.
+        def restore_grab(event):
+            if event.widget is not win:
+                return
+            try:
+                if previous_grab is not None and previous_grab.winfo_exists():
+                    previous_grab.grab_set()
+                    previous_grab.focus_set()
+            except tk.TclError:
+                pass  # The application/parent may be closing as well.
+
+        win.bind('<Destroy>', restore_grab, add='+')
+        win.protocol('WM_DELETE_WINDOW', win.destroy)
+        frame = ttk.Frame(win, padding=16)
+        frame.pack(fill='both', expand=True)
+        controls = ttk.Frame(frame)
+        controls.pack(side='bottom', fill='x', pady=(10, 0))
+        body = ScrolledText(frame, wrap='word', font=('Consolas', 10))
+        body.pack(fill='both', expand=True)
+        body.insert('1.0', format_health_report(report, _UI_LANGUAGE))
+        body.configure(state='disabled')
+
+        def save():
+            path = filedialog.asksaveasfilename(parent=win,
+                title=_gt('导出体检报告', 'Export health report'),
+                defaultextension='.json', filetypes=[('JSON', '*.json')])
+            if not path:
+                return
+            try:
+                export_health_report(report, path)
+                messagebox.showinfo(_gt('导出完成', 'Export complete'),
+                    _gt('报告已导出；分享前请检查路径隐私。', 'Report exported; redact private paths before sharing.'), parent=win)
+            except Exception as error:
+                messagebox.showerror(_gt('导出失败', 'Export failed'), str(error), parent=win)
+
+        ttk.Button(controls, text=_gt('导出体检报告（JSON）', 'Export health report (JSON)'), command=save).pack(side='left')
+        ttk.Button(controls, text=_gt('关闭', 'Close'), command=win.destroy).pack(side='right')
+        win.grab_set()
+        win.focus_set()
+        return report
+
     def open_project_tools(self):
         try:
             proj = self._project()
@@ -10023,7 +10648,7 @@ class KeilPortGUI:
             return
         win = tk.Toplevel(self.root)
         win.title(_tr('工程工具'))
-        self._size_dialog(win, 560, 430)
+        self._size_dialog(win, 640, 740)
         win.transient(self.root)
         frame = ttk.Frame(win, style='Surface.TFrame', padding=20)
         frame.pack(fill='both', expand=True)
@@ -10074,6 +10699,44 @@ class KeilPortGUI:
             except Exception as e:
                 messagebox.showerror(_tr('Keil 编译失败'), str(e), parent=win)
 
+        def recover_cubemx_ui():
+            try:
+                self._background_call(recover_cubemx_project, self._project(),
+                                      preview_callback=self.confirm_diff_preview)
+                messagebox.showinfo(_tr('完成'),
+                    _gt('已核对组件接入；详细结果见日志。请重新打开 Keil 并编译。',
+                        'Integration checked; see log. Reopen Keil and build.'), parent=win)
+            except Exception as error:
+                messagebox.showerror(_gt('恢复停止', 'Recovery stopped'), str(error), parent=win)
+
+        def protect_cubemx_ui():
+            try:
+                self._background_call(protect_cubemx_project, self._project(),
+                                      preview_callback=self.confirm_diff_preview)
+                messagebox.showinfo(_tr('完成'),
+                    _gt('隔离检查完成，详情见日志。旧工程重新生成后仍须体检。',
+                        'Isolation check complete; see log. Check again after regeneration.'), parent=win)
+            except Exception as error:
+                messagebox.showerror(_gt('隔离停止', 'Isolation stopped'), str(error), parent=win)
+
+        def references_ui():
+            win.destroy()
+            open_reference_manager(self, SimpleNamespace(**globals()))
+
+        def drivers_ui():
+            win.destroy()
+            open_driver_generator(self, SimpleNamespace(**globals()))
+
+        ttk.Button(frame, text=_gt('移除文件与路径…', 'Remove files and paths…'),
+                   command=references_ui).pack(fill='x', pady=4)
+        ttk.Button(frame, text=_gt('器件驱动生成器…', 'Device driver generator…'),
+                   command=drivers_ui).pack(fill='x', pady=4)
+        ttk.Button(frame, text=_gt('工程体检（只读）', 'Project health check (read-only)'),
+                   command=self.open_project_doctor).pack(fill='x', pady=4)
+        ttk.Button(frame, text=_gt('CubeMX 重新生成后恢复接入…', 'Restore integration after CubeMX…'),
+                   command=recover_cubemx_ui).pack(fill='x', pady=4)
+        ttk.Button(frame, text=_gt('CubeMX 生成前隔离旧组件…', 'Isolate legacy components before CubeMX…'),
+                   command=protect_cubemx_ui).pack(fill='x', pady=4)
         ttk.Button(frame, text=_tr('导出工程清单（MD / JSON / CSV）'),
                    command=export_manifest_ui).pack(fill='x', pady=4)
         ttk.Button(frame, text=_tr('导出第三方许可证清单'), command=export_license_ui).pack(fill='x', pady=4)
@@ -11095,6 +11758,8 @@ def _preload_cli_config(argv=None):
 
 
 def main():
+    global _GUI_ENTRY_REQUESTED
+    _GUI_ENTRY_REQUESTED = False
     if sys.version_info < (3, 8):
         raise ToolError('本工具需要 Python 3.8 或更高版本；当前为 %s' %
                         '.'.join(str(x) for x in sys.version_info[:3]))
@@ -11130,6 +11795,23 @@ def main():
     ap.add_argument('--scan', help='任务1扫描目录 (多个用 ; 分隔), 默认工程根目录')
     ap.add_argument('--include-h', action='store_true',
                     help='任务1: 同时把头文件加入工程文件树')
+    ap.add_argument('--remove-file', action='append', default=[], metavar='PATH',
+                    help='移除精确文件引用（可重复），不删除磁盘文件；相对路径以 Keil 工程目录为基准')
+    ap.add_argument('--remove-include', action='append', default=[], metavar='PATH',
+                    help='移除工程级 Include（可重复），可按 --target 限定；不自动移除子目录')
+    ap.add_argument('--driver', dest='drivers', action='append', choices=sorted(DRIVER_CATALOG),
+                    help='生成器件驱动（可重复）；默认放入工程 KPS/DeviceDrivers，需填写板级接口')
+    ap.add_argument('--driver-i2c', choices=I2C_MODES, default='hardware',
+                    help='器件 I2C: hardware 阻塞 / software 模拟 / dma 完成等待')
+    ap.add_argument('--driver-spi', choices=SPI_MODES, default='hardware',
+                    help='器件 SPI: hardware 阻塞 / dma 完成等待')
+    ap.add_argument('--driver-port', choices=['auto','generic'], default='auto',
+                    help='auto: STM32F4 HAL/SPL 自动端口；generic: 手工绑定通用回调')
+    ap.add_argument('--driver-i2c-instance', help='已有 I2C 句柄/实例，例如 hi2c1 或 I2C1')
+    ap.add_argument('--driver-spi-instance', help='已有 SPI 句柄/实例，例如 hspi1 或 SPI1')
+    ap.add_argument('--driver-cs', help='SPI 片选 GPIO，例如 PB0（低有效）')
+    ap.add_argument('--driver-scl', help='软件 I2C SCL GPIO，例如 PB6')
+    ap.add_argument('--driver-sda', help='软件 I2C SDA GPIO，例如 PB7')
     ap.add_argument('--freertos', metavar='DIR|auto',
                     help='任务2: FreeRTOS 根目录; 填 auto = 自动下载最新发行版')
     ap.add_argument('--rtthread', metavar='DIR|auto',
@@ -11224,6 +11906,12 @@ def main():
                     help='把完整 unified diff 导出到指定文件')
     ap.add_argument('--export-project', metavar='FILE.md|json|csv',
                     help='导出源文件、Include、宏、Target 和编译器清单')
+    ap.add_argument('--doctor', action='store_true', help='只读工程体检：文件引用、Include 和候选引脚复用冲突')
+    ap.add_argument('--doctor-json', metavar='NEW_FILE.json', help='只读体检并导出 JSON，不覆盖已有文件')
+    ap.add_argument('--doctor-ioc', metavar='FILE.ioc', help='显式选择体检使用的 IOC（多个候选时不猜测）')
+    ap.add_argument('--doctor-language', choices=['zh-CN', 'en'], default='zh-CN', help='体检文本语言')
+    ap.add_argument('--cubemx-recover', action='store_true', help='预览并恢复 CubeMX 重新生成后丢失的已记录组件接入；不恢复旧外设配置')
+    ap.add_argument('--cubemx-protect', action='store_true', help='生成前把完好的旧组件副本隔离到 KPS；保留用户修改与回滚记录')
     ap.add_argument('--license-report', metavar='FILE.md',
                     help='导出已移植第三方组件的许可证审查清单')
     ap.add_argument('--update-gitignore', choices=['state', 'third-party'],
@@ -11234,7 +11922,7 @@ def main():
     ap.add_argument('--uv4', metavar='UV4.exe', help='Keil UV4.exe 路径')
     ap.add_argument('--build-log', metavar='FILE', help='Keil 命令行编译日志路径')
     ap.add_argument('--uninstall', metavar='COMPONENT',
-                    choices=['add_files', 'freertos', 'rtthread', 'lvgl', 'fatfs', 'segger_rtt',
+                    choices=['device_drivers', 'add_files', 'freertos', 'rtthread', 'lvgl', 'fatfs', 'segger_rtt',
                              'littlefs', 'cmsis_dsp', 'rtos_guard', 'lwip', 'tinyusb'],
                     help='按安装清单卸载指定组件')
     ap.add_argument('--rollback', action='store_true', help='回滚最近一次成功事务')
@@ -11308,10 +11996,34 @@ def main():
     if settings_requested:
         tasks.append('project_settings')
 
-    management_action = bool(args.uninstall or args.rollback or args.export_project or
+    doctor_requested = bool(args.doctor or args.doctor_json or args.doctor_ioc)
+    remove_requested = bool(args.remove_file or args.remove_include)
+    if args.drivers:
+        tasks.append('device_drivers')
+    elif (args.driver_i2c != 'hardware' or args.driver_spi != 'hardware' or
+          args.driver_i2c_instance or args.driver_spi_instance or args.driver_cs or args.driver_scl or args.driver_sda):
+        ap.error('通信模式需要同时指定 --driver / Transport options require --driver')
+    if args.drivers and (args.uninstall or args.rollback or args.export_project or args.license_report):
+        ap.error('驱动生成不可与卸载、回滚或导出混用 / Generate drivers separately from uninstall, rollback or export')
+    if remove_requested and (tasks or doctor_requested or args.cubemx_recover or args.cubemx_protect or
+                             args.uninstall or args.rollback or args.export_project or args.license_report or
+                             args.update_gitignore or args.build or args.rebuild):
+        ap.error('引用移除为独立操作 / Reference removal must run separately')
+    if args.cubemx_protect and args.cubemx_recover:
+        ap.error('隔离与恢复请分别执行 / Run isolation and recovery separately')
+    if (args.cubemx_recover or args.cubemx_protect) and (doctor_requested or tasks or args.uninstall or args.rollback or
+                              args.export_project or args.license_report or args.update_gitignore or args.build or args.rebuild):
+        ap.error('--cubemx-recover 是独立恢复操作，不可与移植、体检、其他管理或编译混用。')
+    if doctor_requested and args.dry_run and args.doctor_json:
+        ap.error('--dry-run 不写文件，不能同时使用 --doctor-json。')
+    if doctor_requested and (tasks or args.uninstall or args.rollback or args.export_project or
+                             args.license_report or args.update_gitignore or args.build or args.rebuild):
+        ap.error('工程体检是独立只读操作，不可与移植、工程修改、其他导出或编译混用。')
+    management_action = bool(remove_requested or args.cubemx_protect or args.cubemx_recover or doctor_requested or args.uninstall or args.rollback or args.export_project or
                              args.license_report or args.update_gitignore or
                              args.build or args.rebuild)
     if not tasks and not args.cli and not management_action:
+        _GUI_ENTRY_REQUESTED = True
         launch_gui(args.project or CONFIG['PROJECT'] or None)
         return
 
@@ -11319,6 +12031,34 @@ def main():
     proj = KeilProject(proj_path)
     if args.target:
         proj.select_targets(args.target)
+
+    if remove_requested:
+        wanted = {('file', proj.norm_file(p)) for p in args.remove_file}
+        wanted.update(('include', proj.norm_file(p)) for p in args.remove_include)
+        rows = [r for r in reference_inventory(proj) if (r['kind'], proj.norm_file(r['path'])) in wanted]
+        found = {(r['kind'], proj.norm_file(r['path'])) for r in rows}
+        if wanted - found:
+            raise ToolError('指定引用不在所选 Target 中 / References not found in selected targets: ' +
+                            ', '.join(p for _k, p in sorted(wanted-found)))
+        remove_project_references(proj, rows, yes=args.yes, dry_run=args.dry_run, diff_file=args.diff_file)
+        return
+
+    if args.cubemx_recover:
+        recover_cubemx_project(proj, yes=args.yes, dry_run=args.dry_run)
+        return
+    if args.cubemx_protect:
+        protect_cubemx_project(proj, yes=args.yes, dry_run=args.dry_run)
+        return
+
+    if doctor_requested:
+        try:
+            report = inspect_project(proj, args.doctor_ioc)
+            _console_write(format_health_report(report, args.doctor_language))
+            if args.doctor_json:
+                export_health_report(report, args.doctor_json)
+        except (OSError, ValueError) as error:
+            raise ToolError(str(error))
+        return
 
     freertos = None if (args.freertos and
                         args.freertos.strip().lower() in ('auto', 'download')) else args.freertos
@@ -11331,6 +12071,10 @@ def main():
     tinyusb = None if (args.tinyusb and args.tinyusb.strip().lower() in ('auto', 'download')) else args.tinyusb
 
     opts = SimpleNamespace(interactive=False, yes=args.yes, dry_run=args.dry_run,
+                           drivers=args.drivers, driver_i2c=args.driver_i2c, driver_spi=args.driver_spi,
+                           driver_port=args.driver_port, driver_i2c_instance=args.driver_i2c_instance,
+                           driver_spi_instance=args.driver_spi_instance, driver_cs=args.driver_cs,
+                           driver_scl=args.driver_scl, driver_sda=args.driver_sda,
                            scan_dirs=args.scan, include_h=args.include_h,
                            freertos=freertos, no_os2=args.no_os2,
                            rtthread=args.rtthread,
@@ -11522,12 +12266,12 @@ if __name__ == '__main__':
         log('已退出。')
     except ToolError as e:
         log('[错误] ' + str(e))
-        if getattr(sys, 'frozen', False) and tk is not None:
+        if getattr(sys, 'frozen', False) and tk is not None and _GUI_ENTRY_REQUESTED:
             messagebox.showerror('Keil Port Studio', str(e))
         sys.exit(1)
     except Exception:
         traceback.print_exc()
-        if getattr(sys, 'frozen', False) and tk is not None:
+        if getattr(sys, 'frozen', False) and tk is not None and _GUI_ENTRY_REQUESTED:
             try:
                 messagebox.showerror('Keil Port Studio', _gt('程序发生错误。请查看诊断日志：\n',
                                                            'An error occurred. See diagnostic logs:\n') + str(user_settings_path().parent / 'logs'))

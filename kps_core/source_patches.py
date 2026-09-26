@@ -108,6 +108,29 @@ def patch_project_rtos_exceptions(text):
     禁用 CubeMX 空壳，同时保留文件结构和 USER CODE 区，便于再次生成代码。
     """
     original = text
+    # New CubeMX installs keep ownership entirely inside a preserved USER CODE
+    # block. Rename only this translation unit's empty generated stubs; port.c
+    # still exports the real naked exception handlers under the vector names.
+    # Existing guarded installs retain their old ownership until explicit recovery.
+    include_end = '/* USER CODE END Includes */'
+    marker = '/* KPS FREERTOS EXCEPTION ALIASES BEGIN */'
+    aliases = (marker + '\n'
+               '#define SVC_Handler KPS_CubeMX_Unused_SVC_Handler\n'
+               '#define PendSV_Handler KPS_CubeMX_Unused_PendSV_Handler\n'
+               '/* KPS FREERTOS EXCEPTION ALIASES END */\n')
+    old_guards = '#if !defined(vPortSVCHandler)' in text or '#if !defined(xPortPendSVHandler)' in text
+    if text.count(include_end) == 1 and not old_guards:
+        for handler in ('SVC_Handler', 'PendSV_Handler'):
+            span = _c_function(text, handler)
+            if not span or _c_code(text[span[1] + 1:span[2] - 1]).strip(' \t\r\n;'):
+                return PatchResult(original, status='conflict', reason=handler + ' 不存在、重复或含用户逻辑，拒绝接管')
+        if marker in text:
+            if aliases not in text.replace('\r\n', '\n'):
+                return PatchResult(original, status='conflict', reason='FreeRTOS 异常别名接入块已修改')
+            return PatchResult(original)
+        if re.search(r'^\s*#\s*define\s+(SVC_Handler|PendSV_Handler)\b|KPS_CubeMX_Unused_', _c_code(text), re.M):
+            return PatchResult(original, status='conflict', reason='已有异常重命名，拒绝重复接管')
+        return PatchResult(original, text.replace(include_end, aliases + include_end, 1), 'applied')
     for handler, port_macro in (
             ('SVC_Handler', 'vPortSVCHandler'),
             ('PendSV_Handler', 'xPortPendSVHandler')):
@@ -174,7 +197,10 @@ def patch_main_start_scheduler(text, use_os2=True):
         start = ('\n  /* Create the RTOS objects and start scheduling. */\n'
                  '  MX_FREERTOS_Init();\n'
                  '  vTaskStartScheduler();\n')
-    text = text.replace(init_end, start + init_end, 1)
+    text, inserted = re.subn(r'(?m)^[ \t]*' + re.escape(init_end),
+                            lambda match: start + match.group(0), text, count=1)
+    if inserted != 1:
+        return PatchResult(original, status='unsupported', reason='初始化 USER CODE END 2 标记必须独占一行')
     return PatchResult(original, text, 'applied')
 
 

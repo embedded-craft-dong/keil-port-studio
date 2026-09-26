@@ -13,9 +13,54 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('portability_tool', Path(__file__).parents[1] / 'keil_port_tool.py')
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
+from kps_core.filesystem import extended_windows_path, filesystem_path, copy_tree, remove_tree
 
 
 class PortabilityTests(unittest.TestCase):
+    def test_extended_prefix_is_io_only_and_handles_unc(self):
+        self.assertEqual(extended_windows_path(r'C:\sdk\..\sdk\file.c'), r'\\?\C:\sdk\file.c')
+        self.assertEqual(extended_windows_path(r'\\server\share\sdk\file.c'), r'\\?\UNC\server\share\sdk\file.c')
+        value = r'\\?\C:\sdk\file.c'
+        self.assertEqual(extended_windows_path(value), value)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows extended-length tree I/O')
+    def test_deep_tree_hash_copy_transaction_restore_and_cleanup(self):
+        with tempfile.TemporaryDirectory(prefix='kps-deep-sdk-') as folder:
+            root = Path(folder).resolve()
+            project = root / 'app.uvprojx'
+            project.write_text('<Project><Targets><Target><TargetName>T</TargetName><TargetOption>'
+                '<TargetArmAds><Cads><VariousControls/></Cads></TargetArmAds></TargetOption>'
+                '<Groups/></Target></Targets></Project>', encoding='utf-8')
+            p = m.KeilProject(project)
+            sdk = root / 'SDK'; clone = root / 'clone'
+            relative = Path('中文目录' + 'a' * 85) / ('b' * 95) / ('c' * 95) / 'driver.h'
+            leaf = sdk / relative
+            self.assertGreater(len(str(leaf)), 300)
+            try:
+                filesystem_path(leaf.parent).mkdir(parents=True)
+                filesystem_path(leaf).write_bytes(b'original')
+                original = m.sha256_tree(sdk)
+                copy_tree(sdk, clone)
+                self.assertEqual(m.sha256_tree(clone), original)
+                self.assertEqual(filesystem_path(clone / relative).read_bytes(), b'original')
+                transaction = m.ProjectTransaction(p, 'deep-fixture', [])
+                transaction.snapshot_dir(sdk)
+                transaction.created_dir(clone)
+                transaction.save_meta('prepared')
+                filesystem_path(leaf).write_bytes(b'changed')
+                self.assertNotEqual(m.sha256_tree(sdk), original)
+                transaction.rollback('intentional test')
+                self.assertEqual(m.sha256_tree(sdk), original)
+                self.assertFalse(clone.exists())
+                # Win32 extended prefixes must never be persisted as project paths.
+                self.assertNotIn('\\\\?\\', project.read_text(encoding='utf-8'))
+                self.assertNotIn('\\\\?\\', transaction.meta_path.read_text(encoding='utf-8'))
+            finally:
+                for path in (sdk, clone, root / '.keil-port-tool'):
+                    self.assertIn(root, path.resolve().parents)
+                    if path.exists():
+                        remove_tree(path)
+
     def test_cp1252_log_keeps_unicode_sink_and_does_not_abort(self):
         stream = io.BytesIO()
         output = io.TextIOWrapper(stream, encoding='cp1252', errors='strict')

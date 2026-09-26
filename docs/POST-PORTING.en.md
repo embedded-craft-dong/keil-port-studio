@@ -2,9 +2,9 @@
 
 [简体中文](POST-PORTING.zh-CN.md) · [GUI workflow](GUI.en.md)
 
-**Scope: CubeMX/HAL projects.** SPL and custom entry points have not completed
-automatic-porting acceptance; see [scope](SUPPORT.en.md). Directory fallbacks below
-do not establish complete SPL support.
+**This guide primarily covers CubeMX/HAL projects.** The development version's initial
+SPL RTOS and FatFS/LwIP/TinyUSB integration and measured limits are in the [SPL guide](SPL.en.md),
+not a claim that all SPL component combinations are supported.
 
 The tool copies middleware, updates Keil references and generates integration
 skeletons. It cannot infer your display controller, storage device, PHY, power
@@ -33,7 +33,7 @@ Non-CubeMX projects may use `Application` instead. The preview/log gives actual 
 
 | Component | Main user-editable entry points | First acceptance gate |
 | --- | --- | --- |
-| FreeRTOS | `Core/Src/freertos_app.c`, effective `FreeRTOSConfig.h` | Two tasks and correct wall-clock timing |
+| FreeRTOS | New CubeMX installs: `KPS/FreeRTOS/App/freertos_app.c`; legacy may use `Core/Src`; effective `FreeRTOSConfig.h` | Two tasks and correct wall-clock timing |
 | RT-Thread | `RTThread/App/rtthread_app.c`, `RTThread/Config/rtconfig.h` | Heartbeat, switching, IPC, stack margin |
 | LVGL | MDK `LVGL/porting/lv_port_*_template.*`, library-adjacent `lv_conf.h` | Text, RGB, all edges and animation |
 | FatFS | `FatFs/Target/user_diskio.c`, `FatFs/App/fatfs.c`, effective `ffconf.h` | Write, close, reset, compare readback |
@@ -48,6 +48,10 @@ Existing user files are not simply replaced by new templates. Review and merge
 version/configuration conflicts; do not delete working custom drivers to silence warnings.
 
 ## FreeRTOS / CMSIS-RTOS2
+
+Read [CubeMX coexistence and recovery](CUBEMX.en.md) before regenerating. New library
+copies use `KPS/ThirdParty`; isolate old `Middlewares/Third_Party` copies first to
+avoid CubeMX deleting them.
 
 - Create resources and tasks in the `RTOS_MUTEX`, `RTOS_SEMAPHORES`, `RTOS_TIMERS`
   and `RTOS_THREADS` sections of `MX_FREERTOS_Init()`. Put application work in
@@ -186,18 +190,30 @@ default for every ST7735/ST7789 module.
 - For STM32 ETH, verify RMII/MII, reference clock, PHY address/reset, MDIO/MDC,
   DMA descriptors and buffers. Add cache maintenance on DCache-equipped MCUs.
   The W5500 adapter expects MACRAW Ethernet, not its hardware TCP socket API.
+- PHY Link is not packet reception: enable MAC broadcast acceptance for ARP;
+  some vendor SPL defaults reject broadcasts. Check filtering and hardware/software
+  checksum settings instead of relying on LEDs. F407 PA2 can serve UART2_TX or
+  ETH_MDIO; do not continue UART logging on that pin when using Ethernet.
 - Choose DHCP or static addressing in `LwIP_AddNetif()` and `lwipopts.h`. A direct
   PC link without DHCP needs distinct addresses on one subnet. A wireless campus
   connection does not provide DHCP on the wired adapter. Do not casually disable firewalls.
 - Bare metal must call `LwIP_Poll()` for input/timeouts. Under an RTOS, verify
   the generated input task and TCP/IP thread. Use raw APIs in the proper TCP/IP
   context. Add runtime PHY disconnect/reconnect link-state notifications.
+- A custom TCP raw callback cannot assume an entire received pbuf fits one
+  `tcp_write()`. Segment according to `tcp_sndbuf()`, retain unsent data across
+  resource shortages, and resume from sent/poll callbacks. Handle pbuf ownership,
+  receive-window credit, close and error cleanup. Small echoes do not certify bursts.
 - Selecting HTTP/MQTT sources does not start a server/client. Supply content,
   callbacks, server address, ports and connection logic. TLS/certificates and
   Internet access are not automatically provided.
 - Test PHY ID/link, ARP/Ping, sequenced UDP/TCP payload comparisons, reconnect and load.
 
 ## TinyUSB
+
+- RT-Thread USB IRQ handlers must bracket TinyUSB dispatch with
+  `rt_interrupt_enter()` / `rt_interrupt_leave()`, unless the BSP already provides
+  that bracket. Do not double-register it. The tool does not guess or replace IRQs.
 
 - AC5 auto preparation is role-specific: Device uses 0.17.0, Host/dual-role uses
   0.18.0 with narrowly scoped DWC2 register/FIFO fixes. 0.17 lacks the DWC2 Host
@@ -260,6 +276,19 @@ exit path. Initialize once. Generated locks are per resource category, not bound
 to HAL handles, and do not automatically wrap existing calls. Protect asynchronous
 DMA transactions until completion, not just until launch. Do not take blocking
 mutexes from an ISR.
+New development templates interpret `timeout_ms` as milliseconds: zero tries once,
+and `UINT32_MAX` requests an indefinite wait. Finite values round up to ticks and
+saturate at the kernel's finite limit; tick-phase quantization still applies.
+Native FreeRTOS also requires `INCLUDE_vTaskSuspend=1` for indefinite waiting;
+otherwise `portMAX_DELAY` is finite. Rerunning the tool does not forcibly replace
+existing templates. Back up and merge the newly generated `Lock` function when
+upgrading, retaining your driver integration.
+Measure maximum lock wait and hold times under combined load. CPU-heavy GUI work
+at a higher priority can delay a lower-priority lock holder; priority inheritance
+does not automatically resolve every scheduling problem. Choose priorities from
+application deadlines, bound rendering/driver work, and verify the actual compiler
+optimization level. Do not hide failures by only increasing timeouts or disabling
+assertions. The tool cannot choose all application thread priorities for you.
 
 ## Combined acceptance
 

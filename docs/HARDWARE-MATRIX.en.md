@@ -2,6 +2,72 @@
 
 [简体中文](HARDWARE-MATRIX.zh-CN.md)
 
+Latest SPL component extension (September 25 development source): FatFS + RTT
+passed F407ZGT6/AC5 board RAM-disk checks in bare-metal, native FreeRTOS,
+CMSIS-V2-startup and RT-Thread modes. Native/RT-Thread LwIP passed on-board UDP
+loopback. Eight LwIP/TinyUSB CDC+HID projects across the four modes built
+successfully. Subsequently all four TinyUSB modes passed 120 binary CDC echoes
+(206430 bytes each) and HID interface enumeration. On September 26, all four modes
+also passed physical SD + SPI NOR file operations and read-only retention after
+software reset. A user-confirmed full power cycle then passed read-only retention
+on the RT-Thread image with zero writes/erases. Independent cold tests of the
+other modes, power loss during writes, concurrent physical I/O and DMA endurance
+are not claimed. Four-mode physical LAN8720A checks also passed static IPv4, ping,
+exact UDP/TCP echoes and 60 seconds of concurrent traffic per mode. **This batch
+does not certify cable hot-replug, DHCP/IPv6/TLS, HID key reports or SPL USB Host.**
+See the [SPL matrix](SPL.en.md) for cases, failures/fixes and
+remaining BSP work. The public RC6 EXE is unchanged.
+
+Development addendum: **SPL + RT-Thread 5.2.2** passed a roughly 32-second standalone
+run (IPC 200/s, soft timers about 10/s, zero errors) and a combined LittleFS
+(RAM block backend) + CMSIS-DSP + peripheral-mutex run. 7211 completed file cycles,
+7212 DSP sets, 3143 mutex-contention events, zero errors. Both full AC5 builds had
+0 errors/8 warnings; programming verification/reset and UART queries passed, then
+accepted firmware was restored. After returning, the user confirmed normal display
+and animation on an identical reprogrammed/retested combination image. No physical
+storage, network/USB/touch certification. See [SPL evidence and limits](SPL.en.md).
+
+Actual **CubeMX regeneration + RT-Thread** preserved 127 isolated files. Explicit
+guard recovery retained new PA0 configuration; before/after full AC5 builds had
+0 errors/2 warnings. The recovered firmware passed 10 live RAM samples over about
+22 seconds: task heartbeat and RTOS/HAL ticks advanced, assertion line stayed zero.
+Accepted display firmware was restored afterward. See [CubeMX coexistence](CUBEMX.en.md).
+
+## September 25 development addendum (2.3.0-dev1, not in the RC6 EXE)
+
+Subsequent **SPL + RT-Thread + LVGL 8.4 display/touch** passed with RAM LittleFS,
+DSP and peripheral guards: three A/B clicks each, slider 0..100, user-confirmed
+normal display/interaction. O2 maximum GUI handler interval was 23 ms, with zero
+background/display errors. Earlier lock-wait and O0 timing failures are retained
+alongside their fixes. Manual board adapters/private calibration were required;
+this does not certify automatic arbitrary-display support. See [SPL evidence](SPL.en.md).
+
+- **STM32 SPL + native FreeRTOS / CMSIS-V2**: separate HAL-free projects built,
+  flashed, verified and reset. Each produced about 32 seconds of runtime samples:
+  queues/stream buffers/notifications about 200/s, timers about 10/s, zero errors.
+  Onboard LCD partial updates about 50/s; user confirmed the CMSIS-V2 image was
+  perfect. See the [SPL guide](SPL.en.md).
+- **CubeMX regeneration + both FreeRTOS APIs**: actual PA0 addition/regeneration;
+  all 707 isolated files per fixture retained their hashes, including task edits.
+  Before/after AC5 builds had zero errors/warnings. About 22 seconds of hardware
+  checks per variant confirmed advancing task/RTOS/HAL ticks. The SPL display
+  firmware was restored. Legacy isolation/recovery was also tested using real
+  CubeMX/AC5. See the [coexistence guide](CUBEMX.en.md).
+- This batch did not access storage filesystems, network, USB or touch; these
+  results do not establish their combined operation.
+
+The RT-Thread combination additionally passed five minutes of CRC-protected
+telemetry and three software resets with zero background errors. An independent
+**SPL + FreeRTOS/CMSIS-V2 + LVGL 8.4** combination with RAM LittleFS, DSP and guards
+also passed initial runtime and user interaction: three clicks each on A/B and
+slider range 0..100, confirmed by both CRC records and the user. The guard conversion
+fix was rebuilt/reflashed, then the CMSIS-V2 combination separately
+passed five minutes and three software resets. Multiple tick-rate
+guard conversions and nonzero polling delays are covered by host execution of
+generated C, not board validation at every rate; board combinations use 1000 Hz.
+
+Previously published validation scope and dates follow unchanged.
+
 Updated 2026-09-22. Platform: Puzhong STM32F407ZGT6, ARMCC 5.06 update 7,
 LAN8720, 16 MiB SPI NOR, approximately 8 GB SD, external SPI LCD, USB FS Device.
 UART2 uses a wireless serial bridge. Every programming operation was verified and

@@ -59,6 +59,48 @@ class ActionTests(unittest.TestCase):
         return next(w for w in self.g.root.winfo_children()
                     if isinstance(w, m.tk.Toplevel) and w.title() == title)
 
+    def test_device_generation_and_reference_removal_buttons(self):
+        with patch.object(self.g, 'confirm_diff_preview', return_value=True):
+            self.click('工程工具'); self.click('器件驱动生成器…')
+            win=self.dialog('器件驱动生成器')
+            self.assertEqual(self.g.root.grab_current(),win)
+            self.g.root.update()
+            for widget in descendants(win):
+                if isinstance(widget,(m.ttk.Button,m.ttk.Combobox,m.ttk.Checkbutton)) and widget.winfo_ismapped():
+                    self.assertLessEqual(widget.winfo_rooty()+widget.winfo_height(),win.winfo_rooty()+win.winfo_height(),str(widget))
+            self.click('预览生成…',win)
+            self.assertFalse(self.errors.called,str(self.errors.call_args))
+            self.assertTrue((self.base/'KPS/DeviceDrivers/kps_board_port.c').is_file())
+            self.assertTrue((self.base/'KPS/DeviceDrivers/DRIVER_GUIDE.md').is_file())
+            # Owned driver references must not be removed piecemeal.
+            self.click('工程工具'); self.click('移除文件与路径…')
+            win=self.dialog('移除文件与路径')
+            self.click('勾选筛选结果',win); self.click('预览移除…',win)
+            self.assertTrue(self.errors.called)
+            self.assertIn('Managed component',str(self.errors.call_args))
+            self.errors.reset_mock()
+            # Independent unowned file, real writes and callback-based preview.
+            source=self.base/'extra.c'; source.write_text('int extra;\n')
+            p=m.KeilProject(self.project); p.add_file('User','extra.c',1,'extra.c'); p.save()
+            self.click('工程工具'); self.click('移除文件与路径…')
+            win=self.dialog('移除文件与路径')
+            entry=next(w for w in descendants(win) if isinstance(w,m.ttk.Entry))
+            entry.insert(0,'extra.c'); self.g.root.update()
+            self.click('勾选筛选结果',win); self.click('预览移除…',win)
+            self.assertFalse(self.errors.called,str(self.errors.call_args))
+            self.assertTrue(source.is_file())
+            self.assertFalse(any(r['name']=='extra.c' for r in m.KeilProject(self.project).file_records()))
+            self.g.change_language('en'); self.g.root.update()
+            self.click('Project tools'); self.click('Device driver generator…')
+            win=self.dialog('Device driver generator')
+            self.g.root.update()
+            for widget in descendants(win):
+                if isinstance(widget,(m.ttk.Button,m.ttk.Combobox,m.ttk.Checkbutton)) and widget.winfo_ismapped():
+                    self.assertLessEqual(widget.winfo_rooty()+widget.winfo_height(),win.winfo_rooty()+win.winfo_height(),str(widget))
+            self.click('Close',win)
+            self.click('Project tools'); self.click('Remove files and paths…')
+            self.click('Close',self.dialog('Remove files and paths'))
+
     def test_settings_save_restart_cancel_and_validation(self):
         self.click('设置')
         win = self.dialog('Keil Port Studio 设置')
@@ -146,6 +188,46 @@ class ActionTests(unittest.TestCase):
         self.click('导出工程清单（MD / JSON / CSV）', win)
         self.assertTrue(self.errors.called)
 
+    def test_project_doctor_button_real_readonly_export_and_english(self):
+        before = self.project.read_bytes()
+        self.click('工程工具')
+        tools_win = self.dialog('工程工具')
+        self.click('工程体检（只读）', tools_win)
+        win = self.dialog('工程体检（只读）')
+        # Button.invoke bypasses Tk's input grab. A real click used to be
+        # delivered to the tools dialog behind this report, leaving it inert.
+        self.assertEqual(self.g.root.grab_current(), win)
+        body = next(w for w in descendants(win) if isinstance(w, m.tk.Text))
+        self.assertIn('不等于编译或实板验证', body.get('1.0', 'end'))
+        self.assertEqual(str(body.cget('state')), 'disabled')
+        output = self.base / 'health.json'
+        self.save_dialog.return_value = str(output)
+        self.click('导出体检报告（JSON）', win)
+        report = json.loads(output.read_text(encoding='utf-8'))
+        self.assertTrue(report['read_only'])
+        self.assertEqual(report['targets'][0]['target'], 'Debug')
+        original = output.read_bytes()
+        self.click('导出体检报告（JSON）', win)
+        self.assertTrue(self.errors.called)
+        self.assertEqual(output.read_bytes(), original)
+        self.assertEqual(self.project.read_bytes(), before)
+        self.assertFalse((self.base / '.keil-port-tool').exists())
+        self.click('关闭', win)
+        self.assertEqual(self.g.root.grab_current(), tools_win)
+        self.click('关闭', tools_win)
+        self.assertIsNone(self.g.root.grab_current())
+        self.g.change_language('en')
+        self.g.open_project_doctor()
+        self.g.root.update()
+        win = self.dialog('Project health check (read-only)')
+        body = next(w for w in descendants(win) if isinstance(w, m.tk.Text))
+        self.assertIn('No findings within the limited scan scope.', body.get('1.0', 'end'))
+        self.assertEqual(self.g.root.grab_current(), win)
+        # The title-bar close handler must restore grabs just like the button.
+        self.g.root.tk.call(win.protocol('WM_DELETE_WINDOW'))
+        self.g.root.update()
+        self.assertIsNone(self.g.root.grab_current())
+
     def test_safety_buttons_real_preview_cancel_uninstall_rollback(self):
         source = self.base / 'User' / 'demo.c'; source.parent.mkdir(); source.write_text('int demo;\n')
         opts = SimpleNamespace(scan_dirs=str(source.parent), scan_files=None, include_h=False,
@@ -193,6 +275,43 @@ class ActionTests(unittest.TestCase):
         with patch.object(m, 'build_keil_targets', side_effect=m.ToolError('deliberate failure')):
             self.click('立即调用 Keil 编译')
         self.assertIn('deliberate failure', str(self.errors.call_args))
+
+    def test_cubemx_buttons_real_isolation_and_recovery(self):
+        from test_cubemx_recovery import legacy_fixture
+        from test_cubemx_coexistence import MAIN
+        p, task, sdk = legacy_fixture(self.base / 'cube')
+        self.g.project_var.set(str(p.path)); self.g._project_changed()
+        source = self.base / 'cube/Core/Src/main.c'
+        installed = source.read_text()
+        self.click('工程工具')
+        def answer_preview(label):
+            attempts = [0]
+            def poll():
+                attempts[0] += 1
+                matches = [w for w in descendants(self.g.root)
+                           if isinstance(w, m.ttk.Button) and w.cget('text') == label]
+                if matches:
+                    self.click(label)
+                elif attempts[0] < 200:
+                    self.g.root.after(25, poll)
+                else:
+                    self.fail('No CubeMX preview: ' + label)
+            self.g.root.after(25, poll)
+        answer_preview('取消')
+        self.click('CubeMX 生成前隔离旧组件…')
+        self.assertTrue(task.exists())
+        answer_preview('确认并继续')
+        self.click('CubeMX 生成前隔离旧组件…')
+        self.assertFalse(self.errors.called, str(self.errors.call_args))
+        self.assertTrue((self.base / 'cube/KPS/FreeRTOS/App/freertos_app.c').is_file())
+        source.write_text(MAIN)
+        answer_preview('取消')
+        self.click('CubeMX 重新生成后恢复接入…')
+        self.assertEqual(source.read_text(), MAIN)
+        answer_preview('确认并继续')
+        self.click('CubeMX 重新生成后恢复接入…')
+        self.assertFalse(self.errors.called, str(self.errors.call_args))
+        self.assertEqual(source.read_text(), installed)
 
     @unittest.skipUnless(os.environ.get('KPS_REAL_BUILD_PROJECT'), 'opt-in real Keil build')
     def test_real_keil_build_via_button(self):

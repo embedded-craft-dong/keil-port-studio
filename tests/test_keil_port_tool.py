@@ -230,8 +230,13 @@ with tempfile.TemporaryDirectory() as td:
         './/Target/Groups/Group/Files/File')]
     assert 'ffsystem_cmsis_os.c' in rtos_names
     assert 'ffsystem_baremetal.c' not in rtos_names
-    rtos_cfg = [x for x in rtos_rep.gen_files if Path(x[0]).name == 'ffconf.h'][0][1]
+    rtos_configs = [x for x in rtos_rep.gen_files if Path(x[0]).name == 'ffconf.h']
+    # Existing reentrant=1 is already correct. Do not rewrite user RTC/timeout
+    # just to create an update record on a no-op reapply.
+    rtos_cfg = rtos_configs[0][1] if rtos_configs else m.read_source_text(root / 'FatFs/Target/ffconf.h')
     assert re.search(r'#define\s+FF_FS_REENTRANT\s+1\b', rtos_cfg)
+    assert re.search(r'#define\s+FF_FS_TIMEOUT\s+25\b', rtos_cfg)
+    assert re.search(r'#define\s+FF_FS_NORTC\s+0\b', rtos_cfg)
     assert m.fatfs_rtos_mode(proj, SimpleNamespace(fatfs_mode='auto')) is True
 
     mixed_main, mixed_changed = m.patch_main_fatfs_init(

@@ -2,8 +2,9 @@
 
 [简体中文](GUI.zh-CN.md)
 
-**This release targets CubeMX-generated STM32 HAL + Keil projects.** SPL and custom
-layouts are outside automatic-porting acceptance. Read the [scope](SUPPORT.en.md);
+**Primarily targets CubeMX-generated STM32 HAL + Keil projects.** See the [SPL guide](SPL.en.md)
+for the development version's initial FreeRTOS/CMSIS-V2/RT-Thread support; other custom layouts
+still need separate validation. Read the [scope](SUPPORT.en.md);
 adding project references is not proof of runtime correctness.
 
 Select `zh-CN / en` in the upper-right corner to switch language without losing
@@ -37,6 +38,10 @@ drivers must still match the actual wiring and clocks.
 
 ## Selection behavior
 
+Development source adds **Project tools → Project health check (read-only)** for file references,
+Include directories and candidate pin conflicts, with JSON export. See the [health guide](DOCTOR.en.md).
+The older RC6 EXE does not include this entry point.
+
 - Tick: selected. Empty square: unselected. Dash: partially selected folder.
 - Click a name or press Space to toggle; selecting a folder applies to its children.
 - Clicking the expansion arrow only opens/closes a folder, without toggling it.
@@ -51,6 +56,10 @@ LittleFS and LwIP follows the project's kernel; auto-detection is the usual choi
 Older preset labels remain recognized.
 
 ## Windows and utilities
+
+Development source adds **Project tools → Isolate legacy components before CubeMX…**
+and **Restore integration after CubeMX…**. Both preview changes and support cancellation
+and transaction rollback. See the [CubeMX guide](CUBEMX.en.md), also available in Offline guides.
 
 Logs open separately so file details retain their space. Project settings scroll,
 including keyboard focus reveal. Settings, presets, project tools, and recovery

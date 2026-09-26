@@ -24,7 +24,7 @@ class LanguageTests(unittest.TestCase):
             app.open_guides(); app.root.update()
             win = next(w for w in app.root.winfo_children() if isinstance(w, m.tk.Toplevel) and w.title() == 'Offline guides')
             nb = next(w for w in win.winfo_children() if isinstance(w, m.ttk.Notebook))
-            self.assertEqual(len(nb.tabs()), 3)
+            self.assertEqual(len(nb.tabs()), 6)
             for child in nb.winfo_children():
                 # ScrolledText inserts a containing Frame into the notebook.
                 view = next(w for w in child.winfo_children() if isinstance(w, m.tk.Text))
