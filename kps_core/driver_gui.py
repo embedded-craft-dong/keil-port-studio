@@ -136,9 +136,9 @@ def open_driver_generator(app, api):
         col=(row%3)*2; line=row//3
         ttk.Label(bindings,text=label,style='Body.TLabel').grid(row=line,column=col,sticky='w',padx=5,pady=5)
         ttk.Combobox(bindings,textvariable=fields[key],values=choices,width=15).grid(row=line,column=col+1,padx=5)
-    ttk.Label(frame,text=tr('auto：F4 HAL/SPL 自动填 API；选择已有总线，CS/SCL/SDA 填 PB6 等实际引脚。\n'
+    ttk.Label(frame,text=tr('auto：F1/F4 HAL/SPL 自动填 API；选择已有总线，CS/SCL/SDA 填 PB6 等实际引脚。\n'
         '不猜接线；auto 暂不支持 DMA。generic 保留手工接口。只配置明确选定的 CS / 软件 I2C GPIO。',
-        'auto: F4 HAL/SPL APIs; choose existing buses and real GPIOs (e.g. PB6).\n'
+        'auto: F1/F4 HAL/SPL APIs; choose existing buses and real GPIOs (e.g. PB6).\n'
         'No guessed wiring or automatic DMA. generic keeps manual hooks. Only selected CS/soft-I2C pins are configured.'),
         style='Muted.TLabel',wraplength=860).pack(anchor='w',pady=6)
     ttk.Label(frame,text=tr(

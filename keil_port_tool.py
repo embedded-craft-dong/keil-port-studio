@@ -150,7 +150,7 @@ LWIP_TAG = 'STABLE-2_2_1_RELEASE'
 TINYUSB_TAG = '0.21.0'
 TINYUSB_AC5_TAG = '0.17.0'       # ARM Compiler 5 使用较保守且已验证广泛的版本
 TINYUSB_AC5_HOST_TAG = '0.18.0'  # DWC2 Host requires hcd_dwc2.c plus scoped AC5 fixes
-TOOL_VERSION = '2.3.0-dev1'
+TOOL_VERSION = '2.3.0-dev2'
 RTTHREAD_TAG = 'v5.2.2'
 RTTHREAD_SHA256 = 'c40bd84ee10389988d10cb64dda0ed63d8df719a6a2065cbc1c49bebac4f45b0'
 CMSIS_OS2_H_URL = ('https://raw.githubusercontent.com/ARM-software/CMSIS_5/5.9.0/'
@@ -11806,7 +11806,7 @@ def main():
     ap.add_argument('--driver-spi', choices=SPI_MODES, default='hardware',
                     help='器件 SPI: hardware 阻塞 / dma 完成等待')
     ap.add_argument('--driver-port', choices=['auto','generic'], default='auto',
-                    help='auto: STM32F4 HAL/SPL 自动端口；generic: 手工绑定通用回调')
+                    help='auto: STM32F1/F4 HAL/SPL 自动端口；generic: 手工绑定通用回调')
     ap.add_argument('--driver-i2c-instance', help='已有 I2C 句柄/实例，例如 hi2c1 或 I2C1')
     ap.add_argument('--driver-spi-instance', help='已有 SPI 句柄/实例，例如 hspi1 或 SPI1')
     ap.add_argument('--driver-cs', help='SPI 片选 GPIO，例如 PB0（低有效）')

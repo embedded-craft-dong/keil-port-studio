@@ -2,7 +2,7 @@
 
 [English](RELEASE.en.md)
 
-当前 `2.3.0-dev1` 预发布版提供源码和 Windows 包，新增工程体检、CubeMX 共存保护、SPL 适配、引用移除和器件驱动生成。见[本次发布说明](RELEASE-NOTES-2.3.0-dev1.md)。
+当前 `2.3.0-dev2` 预发布版提供源码和 Windows 包，在 dev1 基础上增加 F1 HAL/SPL 自动驱动端口。见[本次发布说明](RELEASE-NOTES-2.3.0-dev2.md)。
 已发布版本 `2.2.0-rc6` 是 CubeMX/HAL 适配预发布版，不宣称所有组件/芯片/组合已验证。
 RC6 修复首次云端 CI 暴露的控制台编码与 Windows 短路径选择问题；见[RC6 说明](RELEASE-NOTES-2.2.0-rc6.md)
 和[适配范围](SUPPORT.zh-CN.md)。历史修复见[可靠性说明](RELIABILITY.zh-CN.md)
@@ -18,8 +18,8 @@ Python 3.8+ 与打包依赖所需 Python 版本不是同一概念。打包器版
 ```powershell
 py -3.14 -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-build.txt
-.venv\Scripts\python tools\build_release.py releases\2.3.0-dev1
-.venv\Scripts\python tools\verify_release.py releases\2.3.0-dev1
+.venv\Scripts\python tools\build_release.py releases\2.3.0-dev2
+.venv\Scripts\python tools\verify_release.py releases\2.3.0-dev2
 ```
 
 输出目录必须不存在，以免覆盖以前的发布。生成：

@@ -14,7 +14,7 @@ def discover(proj, reader):
         hal=bool(re.search(r'\bUSE_HAL_DRIVER\b',macros))
         spl=bool(re.search(r'\bUSE_STDPERIPH_DRIVER\b',macros))
         if hal and spl: raise ToolError('HAL/SPL 冲突 / Conflicting HAL/SPL defines')
-        profiles.add(('hal' if hal else 'spl' if spl else 'unknown') if device.startswith('STM32F4') else 'unsupported')
+        profiles.add(('hal' if hal else 'spl' if spl else 'unknown') if device.startswith(('STM32F1','STM32F4')) else 'unsupported')
     if len(profiles)!=1 or len(devices)!=1:
         raise ToolError('所选 Target 芯片或库不同，请分别生成 / Select targets with the same MCU/library')
     profile=next(iter(profiles),'unsupported')
@@ -26,6 +26,8 @@ def discover(proj, reader):
             code.append(_c_code(reader(path)))
     code='\n'.join(code)
     result=dict(profile=profile,device=next(iter(devices),''),i2c=[],spi=[])
+    # Keep existing F4 manifest records byte-compatible on repeat generation.
+    if result['device'].startswith('STM32F1'): result['family']='f1'
     for kind in ('i2c','spi'):
         if profile=='hal':
             # Exclude static handles; an extern reference could not link to them.
@@ -51,8 +53,8 @@ def binding(proj, opts, reader):
         raise ToolError('自动端口请一次选择一个 Target，避免硬件配置混用 / Auto binding requires one selected target')
     found=discover(proj,reader)
     if found['profile'] not in ('hal','spl'):
-        raise ToolError('自动端口首批支持 STM32F4 HAL/SPL；本工程未能确认。请显式选 generic / '
-                        'Auto binding currently requires confirmed STM32F4 HAL/SPL; choose generic otherwise')
+        raise ToolError('自动端口支持 STM32F1/F4 HAL/SPL；本工程未能确认。请显式选 generic / '
+                        'Auto binding requires confirmed STM32F1/F4 HAL/SPL; choose generic otherwise')
     selected=set(opts.drivers)
     need_i2c=bool(selected-{'w25q128jv'}); need_spi='w25q128jv' in selected
     i2c_mode=getattr(opts,'driver_i2c','hardware'); spi_mode=getattr(opts,'driver_spi','hardware')
@@ -76,10 +78,16 @@ def binding(proj, opts, reader):
     if len(set(pins))!=len(pins): raise ToolError('GPIO 不能重复 / GPIO assignments overlap')
     if set(pins) & {'PA13','PA14'}:
         raise ToolError('自动端口不重配 SWD 调试引脚 PA13/PA14 / SWD pins are reserved')
+    if found.get('family')=='f1':
+        if any(pin[1] not in 'ABCDEFG' for pin in pins):
+            raise ToolError('STM32F1 无此 GPIO 端口 / Invalid STM32F1 GPIO port')
+        if set(pins) & {'PA15','PB3','PB4'}:
+            raise ToolError('F1 自动端口不修改 JTAG/AFIO 重映射；请选择其他 CS/SCL/SDA / '
+                            'F1 JTAG pins reserved; choose other pins or use generic')
     return found
 
 
-COMMON = r'''/* SPDX-License-Identifier: MIT. Generated STM32F4 binding.
+COMMON = r'''/* SPDX-License-Identifier: MIT. Generated @FAMILY@ binding.
  * Initialize existing clocks and hardware buses FIRST, then call kps_stm32_init().
  * Selected CS/software-I2C pins are configured explicitly by that call.
  * No main()/ISR/SysTick replacement. No automatic storage writes.
@@ -231,12 +239,14 @@ static int board_i2c(void *p,uint8_t a,const uint8_t *t,size_t nt,uint8_t *r,siz
         e=i2c_flag(I2C_FLAG_SB,1,start,ms); if(e) goto done;
         I2C_Send7bitAddress(@BUS@,(uint8_t)(a<<1),I2C_Direction_Receiver);
         e=i2c_flag(I2C_FLAG_ADDR,1,start,ms); if(e) goto done;
-        /* F4 legacy I2C 1/2/3-byte receive sequence. Only short register sequences
+        /* F1/F4 legacy I2C 1/2/3-byte receive sequence. Only short register sequences
          * are atomic; never wait on a peripheral flag with interrupts disabled. */
         saved=__get_PRIMASK(); __disable_irq();
-        if(nr<=2) I2C_AcknowledgeConfig(@BUS@,DISABLE);
+        if(nr==1) I2C_AcknowledgeConfig(@BUS@,DISABLE);
         if(nr==2) I2C_NACKPositionConfig(@BUS@,I2C_NACKPosition_Next);
-        clear_addr(); if(nr==1) I2C_GenerateSTOP(@BUS@,ENABLE);
+        clear_addr();
+        if(nr==2) I2C_AcknowledgeConfig(@BUS@,DISABLE);
+        if(nr==1) I2C_GenerateSTOP(@BUS@,ENABLE);
         __set_PRIMASK(saved);
         while(nr) {
             if(nr==1) {
@@ -268,11 +278,31 @@ done:
 '''
 
 
+F1_SPL_CORE = r'''
+/* STM32F10x SPL ships an older CMSIS that omits DWT and __get_IPSR.
+ * Cortex-M3 architectural addresses, local aliases only; never replace CMSIS.
+ * DWT unavailable/disabled is detected by kps_stm32_init(), not assumed working.
+ */
+#if defined(DWT)
+#define KPS_CYCCNT (DWT->CYCCNT)
+#define KPS_DWT_CTRL (DWT->CTRL)
+#define KPS_ACTIVE_EXCEPTION() __get_IPSR()
+#else
+#define KPS_CYCCNT (*(volatile uint32_t *)0xE0001004UL)
+#define KPS_DWT_CTRL (*(volatile uint32_t *)0xE0001000UL)
+#define KPS_ACTIVE_EXCEPTION() (SCB->ICSR & SCB_ICSR_VECTACTIVE_Msk)
+#endif
+#define KPS_CYCCNTENA 1UL
+'''
+
+
 def render_stm32(config):
     hal=config['profile']=='hal'
-    includes=['#include "stm32f4xx_hal.h"'] if hal else [
-        '#include "stm32f4xx_gpio.h"','#include "stm32f4xx_rcc.h"',
-        '#include "stm32f4xx_i2c.h"','#include "stm32f4xx_spi.h"']
+    family=config.get('family','f4')
+    if family not in ('f1','f4'): raise ToolError('Unsupported STM32 family')
+    prefix='stm32f1xx' if family=='f1' and hal else 'stm32f10x' if family=='f1' else 'stm32f4xx'
+    includes=['#include "'+prefix+'_hal.h"'] if hal else [
+        '#include "'+prefix+'_'+part+'.h"' for part in ('gpio','rcc','i2c','spi')]
     parts=[]; init=[]
     def pin_parts(pin): return 'GPIO'+pin[1], ('GPIO_PIN_' if hal else 'GPIO_Pin_')+pin[2:]
     for role in ('cs','scl','sda'):
@@ -284,6 +314,11 @@ def render_stm32(config):
                 'HAL_GPIO_WritePin('+port+','+bit+',GPIO_PIN_SET); g.Pin='+bit+'; '
                 'g.Mode='+('GPIO_MODE_OUTPUT_PP' if role=='cs' else 'GPIO_MODE_OUTPUT_OD')+'; '
                 'g.Pull=GPIO_NOPULL; g.Speed=GPIO_SPEED_FREQ_HIGH; HAL_GPIO_Init('+port+',&g); }')
+        elif family=='f1':
+            init.append('{ GPIO_InitTypeDef g; RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIO'+pin[1]+',ENABLE); '
+                'GPIO_SetBits('+port+','+bit+'); GPIO_StructInit(&g); g.GPIO_Pin='+bit+'; '
+                'g.GPIO_Mode='+('GPIO_Mode_Out_PP' if role=='cs' else 'GPIO_Mode_Out_OD')+'; '
+                'g.GPIO_Speed=GPIO_Speed_2MHz; GPIO_Init('+port+',&g); }')
         else:
             init.append('{ GPIO_InitTypeDef g; RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIO'+pin[1]+',ENABLE); '
                 'GPIO_SetBits('+port+','+bit+'); GPIO_StructInit(&g); g.GPIO_Pin='+bit+'; '
@@ -306,9 +341,13 @@ def render_stm32(config):
     if config['need_spi']:
         port,bit=pin_parts(config['cs'])
         parts.append((HAL_SPI if hal else SPL_SPI).replace('@BUS@',config['spi']).replace('@PORT@',port).replace('@PIN@',bit))
-    code=COMMON.replace('@INCLUDES@','\n'.join(includes)).replace('@TRANSPORTS@','\n'.join(parts))
+    code=COMMON.replace('@FAMILY@','STM32'+family.upper()).replace('@INCLUDES@','\n'.join(includes)).replace('@TRANSPORTS@','\n'.join(parts))
     code=code.replace('@INIT@','\n    '.join(init)).replace('@I2C@','board_i2c' if config['need_i2c'] else '0')
     code=code.replace('@SPI@','board_spi' if config['need_spi'] else '0')
+    if family=='f1' and not hal:
+        code=code.replace('DWT->CYCCNT','KPS_CYCCNT').replace('DWT->CTRL','KPS_DWT_CTRL')
+        code=code.replace('DWT_CTRL_CYCCNTENA_Msk','KPS_CYCCNTENA').replace('__get_IPSR()','KPS_ACTIVE_EXCEPTION()')
+        code=code.replace('static kps_board_context context;',F1_SPL_CORE+'\nstatic kps_board_context context;')
     if hal or not (config['need_spi'] or (config['need_i2c'] and config['i2c_mode']=='hardware')):
         code=re.sub(r'static int elapsed\(.*?\n}\n','',code,count=1,flags=re.S)
     header='''#ifndef KPS_STM32_PORT_H

@@ -1,16 +1,17 @@
 # Keil Port Studio
 
-[English](README.en.md) · **2.3.0-dev1 / 工程适配预发布版**
+[English](README.en.md) · **2.3.0-dev2 / 工程适配预发布版**
 
-[下载 Windows 完整程序包](https://github.com/embedded-craft-dong/keil-port-studio/releases/download/v2.3.0-dev1/KeilPortStudio-Windows-x64.zip) · [发布说明与源码包](https://github.com/embedded-craft-dong/keil-port-studio/releases/tag/v2.3.0-dev1)
+[下载 Windows 完整程序包](https://github.com/embedded-craft-dong/keil-port-studio/releases/download/v2.3.0-dev2/KeilPortStudio-Windows-x64.zip) · [发布说明与源码包](https://github.com/embedded-craft-dong/keil-port-studio/releases/tag/v2.3.0-dev2)
 
 当前源码新增只读[工程体检](docs/DOCTOR.zh-CN.md)与[标准库 RTOS / 组件适配](docs/SPL.zh-CN.md)。
 另有 [CubeMX 重新生成保护、旧组件隔离与接入恢复](docs/CUBEMX.zh-CN.md)。
 新增[文件/Include 引用移除和器件驱动生成器](docs/DRIVERS.zh-CN.md)，可选软件 I²C、硬件阻塞与 DMA 完成等待接口。
 新驱动目前仅主机协议与编译验证，不作为实板或 DMA 性能验收。
-STM32F4 HAL/标准库可自动生成硬件 I²C/SPI、软件 I²C 的板级 API；仍需明确总线/引脚并调用初始化。
+当前源码支持 STM32F1/F4 HAL/标准库自动生成硬件 I²C/SPI、软件 I²C 的板级 API；仍需明确总线/引脚并调用初始化。
+F1 支持已包含在 `2.3.0-dev2` 源码和 Windows 包中；编译/链接与模拟测试不等于实板验收。
 自动 DMA 和其他 STM32 系列尚未覆盖，可显式使用通用回调模式。
-`2.3.0-dev1` 提供源码和 Windows 包；旧 `2.2.0-rc6` 不含新增功能，仍保留供回退。
+`2.3.0-dev2` 提供源码和 Windows 包；旧 `dev1` 和 `2.2.0-rc6` 仍保留供回退。
 
 主要适配 STM32CubeMX 生成的 STM32 HAL + Keil 工程。开发版增加 STM32 SPL 的
 FreeRTOS/CMSIS-V2、RT-Thread 启动，以及 FatFS、LwIP、TinyUSB 入口接入。F407/AC5 已有独立实板
@@ -42,7 +43,7 @@ SEGGER RTT、CMSIS-DSP 和外设锁模板。生成框架不等于完成硬件驱
 - [Git 管理与安装](docs/GIT.zh-CN.md)
 - [工程体检：文件引用与候选引脚冲突](docs/DOCTOR.zh-CN.md)
 - [STM32 标准库适配：前置准备、任务入口与实测边界](docs/SPL.zh-CN.md)
-- [2.3.0-dev1 更新与已知限制](docs/RELEASE-NOTES-2.3.0-dev1.md)
+- [2.3.0-dev2 更新与已知限制](docs/RELEASE-NOTES-2.3.0-dev2.md)
 
 ## 重要边界
 

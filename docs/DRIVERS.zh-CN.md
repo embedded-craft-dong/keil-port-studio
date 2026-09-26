@@ -2,7 +2,7 @@
 
 [English](DRIVERS.en.md)
 
-这是 `2.3.0-dev1` 源码与 Windows 预发布包的功能，旧 RC6 Windows 包没有这些入口。
+这是 `2.3.0-dev2` 源码与 Windows 预发布包的功能，旧 RC6 Windows 包没有这些入口。
 工具新增协议驱动，不等于新增对应型号的实板验证。已有板卡中间件测试也不能用来证明这些新驱动。
 
 ## 移除文件和 Include 路径
@@ -35,11 +35,16 @@ python keil_port_tool.py Demo.uvprojx --target Debug --remove-file '..\User\old.
 
 ### STM32 自动端口（新增）
 
-检测到 STM32F4 和明确的 `USE_HAL_DRIVER` / `USE_STDPERIPH_DRIVER` 时，界面默认选择 `auto`。
+当前源码检测到 STM32F1/F4 和明确的 `USE_HAL_DRIVER` / `USE_STDPERIPH_DRIVER` 时，界面默认选择 `auto`。
+F1 支持从 `2.3.0-dev2` 起包含在源码和 Windows 包中；旧 dev1 EXE 不含该扩展。
 首批自动端口支持 **HAL / 标准库的硬件 I²C、硬件 SPI、软件 I²C**，不是所有 STM32 系列通用。
 一次选择一个 Target。检测到唯一的已有总线初始化会预选实例；多个实例需选择。
 SPI 填低有效 CS（如 PB0），软件 I²C 填 SCL/SDA；不能凭芯片型号推断你的外部接线。
 所选 GPIO 必须没有其他用途；PA13/PA14 调试脚拒绝自动重配。
+F1 额外保留 PA15/PB3/PB4（JTAG），仅接受 A–G 端口；还需核对具体封装是否引出该脚。
+F1 标准库使用 APB2 GPIO 时钟、`GPIO_Mode_Out_PP/Out_OD`，兼容旧 CMSIS 的 DWT 定义缺失。
+不改 AFIO 重映射或硬件总线初始化：已有重映射后的 I²C/SPI 仍通过原实例访问。
+需要使用 JTAG 引脚时，请自行确认调试配置并选 generic，不会代替用户关闭调试接口。
 
 自动端口不再留总线 API / GPIO / 延时 / 锁的 TODO：
 
@@ -125,6 +130,12 @@ CubeMX 重新生成后若工程引用被删，使用现有的体检/接入恢复
 GUI 回调测试使用真实临时工程，不等于人工鼠标验收。
 `tests/test_driver_stm32.py` 另测 HAL/SPL 识别、歧义拒绝、自动 API 模拟执行（含 1/2/3 字节 I²C 接收）、
 SPI CS 异常释放，并使用真实 STM32F4 HAL/SPL 头文件做 AC5 编译；仍不是对应器件的实板验收。
+`tests/test_driver_stm32f1.py` 复用相同 API 执行测试，并检查 F1 GPIO、保留引脚、重复生成和卸载。
+真实 SDK 测试使用 Cortex-M3/C99/O2 编译全部 7 种器件，链接原厂 HAL/SPL 实现；覆盖
+HAL `STM32F103xB/xE`、`STM32F107xC` 和 SPL `STM32F10X_MD/HD/CL`，各含硬件/软件 I²C 与 SPI。
+测试镜像仅用于链接验收，不烧录。配置 `KPS_DRIVER_F1_HAL_SDK`（Cube 工程根目录）、
+`KPS_DRIVER_F1_SPL_SDK`（完整标准库包根目录）与 `ARMCC` 后运行；没有 SDK/编译器时明确跳过。
+不能据此宣称所有 F1 型号、SDK 版本或实际传感器均已验收。F1 尚无实板测试。
 
 **本批新器件驱动尚未实板验收，也尚无 DMA 性能测量。** 先按指南做只读识别，再在授权区域测试
 擦写、拔线超时和断电保留；没有实物的项目不要勾成“已实测”。驱动及生成代码为 MIT，原厂 PDF 不随包分发。

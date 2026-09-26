@@ -2,7 +2,7 @@
 
 [简体中文](DRIVERS.zh-CN.md)
 
-These are `2.3.0-dev1` development features, not part of the published RC6 Windows package.
+These are `2.3.0-dev2` development features, not part of the published RC6 Windows package.
 Existing board/middleware results do not validate these newly generated device drivers.
 
 ## Remove files and include paths
@@ -98,12 +98,17 @@ removes references, use health check/integration recovery; the tool does not mod
 
 ### Automatic STM32 binding
 
-With confirmed STM32F4 + USE_HAL_DRIVER / USE_STDPERIPH_DRIVER, the GUI defaults to
+Current source supports STM32F1/F4 + USE_HAL_DRIVER / USE_STDPERIPH_DRIVER; the GUI defaults to
 `auto`. Select one Target. A unique initialized hardware bus is preselected; choose
 an instance when ambiguous. Enter the actual active-low SPI CS or software-I2C
 SCL/SDA GPIOs (e.g. PB0/PB6/PB7). Never reuse occupied pins; SWD PA13/PA14 is rejected.
 Automatic binding fills HAL/SPL hardware I2C/SPI and software-I2C APIs, delays,
 GPIO and concurrent-call protection. It is NOT an all-STM32-family implementation.
+F1 support is included in dev2 source and Windows packages; the old dev1 EXE does not include it.
+F1 SPL uses APB2 GPIO clocks and Out_PP/Out_OD modes, with local compatibility for
+old CMSIS missing DWT definitions. Existing AFIO remapping and hardware bus setup
+are preserved. F1 also reserves JTAG PA15/PB3/PB4 and accepts GPIO ports A-G only;
+check actual package availability. Use generic for deliberate debug-pin reuse.
 
 Run existing clock/hardware-bus initialization first, include `kps_stm32_port.h`,
 call and check `kps_stm32_init()`, then obtain `kps_bus bus=kps_stm32_bus()`.
@@ -131,6 +136,14 @@ python keil_port_tool.py Demo.uvprojx --target Debug --driver sht3x --driver-por
 against mocks (including legacy I2C 1/2/3-byte receive sequencing and SPI CS error
 release), and compiles against real F4 HAL/SPL SDK headers with AC5 when available.
 This does not certify electrical wiring or physical sensor behavior.
+`test_driver_stm32f1.py` reuses API execution checks and checks F1 GPIO/debug-pin
+protection, repeat generation and uninstall. With `KPS_DRIVER_F1_HAL_SDK` (Cube
+project root), `KPS_DRIVER_F1_SPL_SDK` (full SPL package root) and `ARMCC`, it compiles
+all seven device drivers and links real vendor implementations at Cortex-M3/C99/O2.
+The matrix covers HAL STM32F103xB/xE and STM32F107xC, SPL STM32F10X_MD/HD/CL,
+each with hardware/software I2C plus SPI. Link-only images are never flashed.
+Unavailable SDK/compiler tests are explicit skips. This does not cover every F1
+part or SDK version, and no F1 physical acceptance has been performed.
 
 `tests/test_device_drivers.py` compiles and executes emitted C against protocol models for page
 boundaries, ranges, write protection, readback, CRC, conversions, timeout, lock release, software

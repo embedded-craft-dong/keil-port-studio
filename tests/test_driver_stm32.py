@@ -2,6 +2,7 @@
 import contextlib
 import io
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -189,6 +190,7 @@ def options(**kwargs):
 
 
 class STM32BindingTests(unittest.TestCase):
+    family='f4'
     def fixture(self,root,hal):
         p=project(root,'USE_HAL_DRIVER' if hal else 'USE_STDPERIPH_DRIVER')
         (root/'User/entry.c').write_text('''I2C_HandleTypeDef hi2c1;
@@ -261,7 +263,7 @@ hspi1.Instance=SPI1; HAL_SPI_Init(&hspi1); }
                         self.assertNotIn('warning:',result.stderr.lower(),result.stderr)
 
     def test_execute_generated_hal_and_spl_api_bindings(self):
-        gcc=Path(os.environ.get('KPS_GCC','C:/MinGW/bin/gcc.exe'))
+        gcc=Path(os.environ.get('KPS_GCC',shutil.which('gcc') or 'C:/MinGW/bin/gcc.exe'))
         if not gcc.is_file(): self.skipTest('GCC unavailable; no host binding execution')
         for hal in (True,False):
             with self.subTest(hal=hal),tempfile.TemporaryDirectory() as td:
@@ -269,9 +271,20 @@ hspi1.Instance=SPI1; HAL_SPI_Init(&hspi1); }
                 cfg=binding(p,options(),m.read_source_text)
                 files=render_pack(['sht3x','w25q128jv'],'hardware','hardware',cfg)
                 for name,text in files.items(): (root/name).write_text(text,encoding='utf-8')
-                for name in ('stm32f4xx_hal.h','stm32f4xx_gpio.h','stm32f4xx_rcc.h','stm32f4xx_spi.h','stm32f4xx_i2c.h'):
-                    (root/name).write_text(MOCK_H)
-                (root/'mock.c').write_text(MOCK_C)
+                header,source=MOCK_H,MOCK_C
+                prefix='stm32f4xx'
+                if self.family=='f1':
+                    prefix='stm32f10x'
+                    # F1 SPL does not have F4 OType/PuPd fields or AHB1 GPIO APIs.
+                    header=header.replace(',GPIO_OType,GPIO_PuPd','')
+                    header=header.replace('#define GPIO_Mode_OUT 1','#define GPIO_Mode_Out_PP 1\n#define GPIO_Mode_Out_OD 2')
+                    header=header.replace('#define GPIO_OType_PP 1','').replace('#define GPIO_PuPd_NOPULL 0','')
+                    header=header.replace('GPIO_Speed_50MHz','GPIO_Speed_2MHz').replace('RCC_AHB1','RCC_APB2')
+                    source=source.replace('stm32f4xx_hal.h','stm32f1xx_hal.h').replace('RCC_AHB1','RCC_APB2')
+                for name in [prefix+'_'+part+'.h' for part in ('gpio','rcc','spi','i2c')]+[
+                        'stm32f1xx_hal.h' if self.family=='f1' else 'stm32f4xx_hal.h']:
+                    (root/name).write_text(header)
+                (root/'mock.c').write_text(source)
                 args=[str(gcc),'-std=c99','-O2','-Wall','-Wextra','-Werror']
                 if hal: args+=['-DTEST_HAL']
                 args += [str(path) for path in root.glob('*.c')]+['-o',str(root/'mock.exe')]

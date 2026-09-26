@@ -2,7 +2,7 @@
 
 [简体中文](RELEASE.zh-CN.md)
 
-The `2.3.0-dev1` prerelease provides source and Windows packages, adding health checks, CubeMX safeguards, SPL integration, reference removal and device driver generation. See the [release notes](RELEASE-NOTES-2.3.0-dev1.md).
+The `2.3.0-dev2` prerelease provides source and Windows packages, adding F1 HAL/SPL automatic driver ports to dev1. See the [release notes](RELEASE-NOTES-2.3.0-dev2.md).
 The published `2.2.0-rc6` is a CubeMX/HAL adaptation prerelease, not certification of all devices/components.
 RC6 fixes console encoding and Windows short-path selection issues found by the first hosted CI run.
 See [RC6 notes](RELEASE-NOTES-2.2.0-rc6.md) and [scope](SUPPORT.en.md).
@@ -19,8 +19,8 @@ Pinned dependencies do not guarantee byte-for-byte reproducible binaries.
 ```powershell
 py -3.14 -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-build.txt
-.venv\Scripts\python tools\build_release.py releases\2.3.0-dev1
-.venv\Scripts\python tools\verify_release.py releases\2.3.0-dev1
+.venv\Scripts\python tools\build_release.py releases\2.3.0-dev2
+.venv\Scripts\python tools\verify_release.py releases\2.3.0-dev2
 ```
 
 The output directory must not already exist. Outputs:

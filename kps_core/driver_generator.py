@@ -178,7 +178,7 @@ def render_pack(selected, i2c_mode='hardware', spi_mode='hardware', board=None):
     if board:
         record=json.loads(files['driver-pack.json']); record['board']=board
         files['driver-pack.json']=json.dumps(record,indent=2)+'\n'
-        files['DRIVER_GUIDE.md']='''# STM32F4 automatic binding / 自动端口
+        files['DRIVER_GUIDE.md']='''# STM32 automatic binding / 自动端口
 
 The board API bodies are filled for the detected HAL/SPL project. Generic TODO
 instructions below apply only when changing to a custom port.
@@ -200,6 +200,11 @@ instructions below apply only when changing to a custom port.
 5. No automatic DMA binding or physical-device acceptance is claimed. Automatic
    DMA selection is rejected, not silently downgraded. Generic DMA remains available.
    当前自动端口不代表所有 STM32 系列，也不代表对应器件已在实板测过。
+6. STM32F1: existing AFIO remapping and hardware bus pin setup are preserved.
+   F1 标准库使用 APB2 GPIO 时钟和 Out_PP/Out_OD；不写 AFIO_MAPR，不自动关闭 JTAG。
+   CS/软件 I2C 拒绝 PA13/PA14/PA15/PB3/PB4；使用实际封装上可用且未占用的 GPIO。
+   Hardware remapped I2C/SPI works through the existing initialized instance;
+   verify project remapping/wiring yourself. No F1 physical acceptance is claimed.
 
 ```json
 ''' + json.dumps(board,indent=2) + '\n```\n\n---\n\n' + files['DRIVER_GUIDE.md']
@@ -242,7 +247,7 @@ def plan_drivers(api, proj, opts, rep):
                 rep.files.append(('KPS Device Drivers', name))
     proj.add_include_path(api.rel_or_abs(destination, proj.dir), rep)
     if board:
-        rep.notes.append('STM32F4 '+board['profile']+' 自动端口已填 API；完成已有总线初始化后调用 kps_stm32_init。'
+        rep.notes.append('STM32'+board.get('family','f4').upper()+' '+board['profile']+' 自动端口已填 API；完成已有总线初始化后调用 kps_stm32_init。'
                          '核对所选 GPIO，详见 DRIVER_GUIDE.md / Auto APIs filled; verify pins and initialize before use.')
     else:
         rep.notes.append('驱动需要完成 TODO 板级接口；未自动操作硬件。详见 KPS/DeviceDrivers/DRIVER_GUIDE.md / '
