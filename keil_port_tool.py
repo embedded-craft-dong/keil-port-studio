@@ -150,7 +150,7 @@ LWIP_TAG = 'STABLE-2_2_1_RELEASE'
 TINYUSB_TAG = '0.21.0'
 TINYUSB_AC5_TAG = '0.17.0'       # ARM Compiler 5 使用较保守且已验证广泛的版本
 TINYUSB_AC5_HOST_TAG = '0.18.0'  # DWC2 Host requires hcd_dwc2.c plus scoped AC5 fixes
-TOOL_VERSION = '2.3.0-dev2'
+TOOL_VERSION = '2.3.0-dev3'
 RTTHREAD_TAG = 'v5.2.2'
 RTTHREAD_SHA256 = 'c40bd84ee10389988d10cb64dda0ed63d8df719a6a2065cbc1c49bebac4f45b0'
 CMSIS_OS2_H_URL = ('https://raw.githubusercontent.com/ARM-software/CMSIS_5/5.9.0/'
@@ -205,6 +205,7 @@ from kps_core.reference_actions import inventory as reference_inventory, remove_
 from kps_core.driver_generator import plan_drivers
 from kps_core.device_drivers import CATALOG as DRIVER_CATALOG, I2C_MODES, SPI_MODES
 from kps_core.driver_gui import open_reference_manager, open_driver_generator
+from kps_core.keil_windows import discover_keil_windows
 
 
 USER_SETTINGS_DEFAULTS = {
@@ -8569,6 +8570,12 @@ class GitRepository:
 _UI_LANGUAGE = 'zh-CN'
 _GUI_ENTRY_REQUESTED = False
 _EN_MESSAGES = {
+    'Keil 窗口': 'Keil windows', '刷新窗口': 'Refresh windows',
+    '检测中…': 'Detecting…', '未检测到 Keil 窗口': 'No Keil windows detected',
+    '请选择 Keil 窗口': 'Select a Keil window',
+    '路径未识别，请手动选择': 'Path unavailable; choose manually',
+    '检测失败，请手动选择': 'Detection failed; choose manually',
+    '只读检测；写入前关闭工程': 'Read-only scan; close project before writing',
     '文件 / 目录': 'File / directory', '用途': 'Purpose', '目录': 'Directory',
     '尚未扫描文件': 'Not scanned',
     '尚未扫描文件  ·  请先选择源码并扫描 / 自动准备': 'Not scanned — select sources, then scan or prepare',
@@ -9326,6 +9333,14 @@ class KeilPortGUI:
         self._configure_styles()
 
         self.project_var = tk.StringVar(value=str(initial_project or ''))
+        self.keil_window_var = tk.StringVar(value=_tr('检测中…'))
+        self._keil_windows = []
+        self._selected_keil_window = None
+        self._keil_scan_running = False
+        self._keil_scan_after = None
+        self._project_revision = 0
+        self.project_var.trace_add('write', self._project_edited)
+        self._loaded_project = None
         self.target_var = tk.StringVar(value=_tr('全部 Target'))
         self.sdk_var = tk.StringVar()
         self.scan_var = tk.StringVar()
@@ -9405,12 +9420,10 @@ class KeilPortGUI:
         _PROGRESS_SINK = self.update_progress
         self.root.protocol('WM_DELETE_WINDOW', self._close)
 
-        if not self.project_var.get():
-            hits = _find_projects(Path.cwd())
-            if len(hits) == 1:
-                self.project_var.set(str(hits[0].resolve()))
         if self.project_var.get():
             self._project_changed()
+        # The window is already usable while the read-only scan runs.
+        self._keil_scan_after = self.root.after(100, self.refresh_keil_windows)
 
     def _configure_styles(self):
         """不依赖第三方主题的现代浅色视觉系统。"""
@@ -9454,11 +9467,17 @@ class KeilPortGUI:
         style.configure('TCombobox', fieldbackground='#FFFFFF', foreground=c['text'],
                         bordercolor=c['border'], arrowcolor=c['muted'], padding=(8, 6))
         style.map('TCombobox', bordercolor=[('focus', c['primary'])],
+                  foreground=[('disabled', c['muted']), ('readonly', c['text'])],
                   fieldbackground=[('readonly', '#FFFFFF')])
         style.configure('TButton', background='#FFFFFF', foreground='#334155',
                         bordercolor=c['border'], lightcolor=c['border'], darkcolor=c['border'],
                         padding=(11, 6), font=('Microsoft YaHei UI', 9))
         style.map('TButton', background=[('active', '#EEF2F7'), ('pressed', '#E2E8F0')])
+        # Three compact project rows leave the component file checklist usable
+        # at 980x650; component-page controls retain their larger padding.
+        style.configure('Project.TEntry', padding=(8, 3))
+        style.configure('Project.TCombobox', padding=(8, 3))
+        style.configure('Project.TButton', padding=(11, 3))
         style.configure('Primary.TButton', background=c['primary'], foreground='#FFFFFF',
                         bordercolor=c['primary'], lightcolor=c['primary'], darkcolor=c['primary'],
                         padding=(18, 8), font=('Microsoft YaHei UI', 10, 'bold'))
@@ -9522,7 +9541,7 @@ class KeilPortGUI:
         app = ttk.Frame(self.root, style='App.TFrame')
         app.pack(fill='both', expand=True)
 
-        header = ttk.Frame(app, style='Header.TFrame', padding=(20, 8))
+        header = ttk.Frame(app, style='Header.TFrame', padding=(20, 6))
         header.pack(fill='x')
         self.header_frame = header
         header.columnconfigure(0, weight=1)
@@ -9538,37 +9557,49 @@ class KeilPortGUI:
         language.grid(row=0, column=2, padx=(10, 0))
         language.bind('<<ComboboxSelected>>', lambda _e: self.change_language(self.language_var.get()))
 
-        outer = ttk.Frame(app, style='App.TFrame', padding=(16, 10, 16, 10))
+        outer = ttk.Frame(app, style='App.TFrame', padding=(16, 8, 16, 8))
         outer.pack(fill='both', expand=True)
         self.main_frame = outer
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(1, weight=1)
 
-        project_card = ttk.Frame(outer, style='Surface.TFrame', padding=(14, 8))
-        project_card.grid(row=0, column=0, sticky='ew', pady=(0, 10))
+        project_card = ttk.Frame(outer, style='Surface.TFrame', padding=(14, 4))
+        project_card.grid(row=0, column=0, sticky='ew', pady=(0, 6))
         self.project_card = project_card
         project_card.columnconfigure(1, weight=1)
         ttk.Label(project_card, text=_tr('工程'), style='Body.TLabel').grid(
             row=0, column=0, sticky='w', padx=(0, 8))
-        self.project_entry = ttk.Entry(project_card, textvariable=self.project_var)
+        self.project_entry = ttk.Entry(project_card, textvariable=self.project_var, style='Project.TEntry')
         self.project_entry.grid(row=0, column=1, sticky='ew')
         self.project_entry.bind('<Return>', lambda _e: self._project_changed())
-        ttk.Button(project_card, text=_tr('选择工程'), command=self.browse_project).grid(
+        ttk.Button(project_card, text=_tr('选择工程'), command=self.browse_project, style='Project.TButton').grid(
             row=0, column=2, padx=(8, 12))
         ttk.Label(project_card, text='Target', style='Body.TLabel').grid(
             row=0, column=3, sticky='w', padx=(0, 7))
         self.target_combo = ttk.Combobox(project_card, textvariable=self.target_var,
-                                         state='readonly', width=17,
+                                         state='readonly', width=17, style='Project.TCombobox',
                                          values=[_tr('全部 Target')])
         self.target_combo.grid(row=0, column=4, sticky='ew')
         ttk.Label(project_card, text=_tr('库仓库'), style='Body.TLabel').grid(
             row=1, column=0, sticky='w', padx=(0, 8), pady=(6, 0))
-        ttk.Entry(project_card, textvariable=self.sdk_var).grid(
+        ttk.Entry(project_card, textvariable=self.sdk_var, style='Project.TEntry').grid(
             row=1, column=1, sticky='ew', pady=(6, 0))
-        ttk.Button(project_card, text=_tr('选择目录'), command=lambda: self.browse_dir(self.sdk_var)).grid(
+        ttk.Button(project_card, text=_tr('选择目录'), command=lambda: self.browse_dir(self.sdk_var), style='Project.TButton').grid(
             row=1, column=2, padx=(8, 12), pady=(6, 0))
         ttk.Label(project_card, text=_tr('中间件独立复制，不改共享库'),
                   style='Muted.TLabel').grid(row=1, column=3, columnspan=2, sticky='w', pady=(6, 0))
+        ttk.Label(project_card, text=_tr('Keil 窗口'), style='Body.TLabel').grid(
+            row=2, column=0, sticky='w', padx=(0, 8), pady=(6, 0))
+        self.keil_window_combo = ttk.Combobox(project_card, textvariable=self.keil_window_var,
+                                               state='readonly', width=20, style='Project.TCombobox')
+        self.keil_window_combo.grid(row=2, column=1, sticky='ew', pady=(6, 0))
+        self.keil_window_combo.bind('<<ComboboxSelected>>', self.choose_keil_window)
+        self.keil_refresh_button = ttk.Button(project_card, text=_tr('刷新窗口'),
+                                               command=self.refresh_keil_windows, style='Project.TButton')
+        self.keil_refresh_button.grid(row=2, column=2, padx=(8, 12), pady=(6, 0))
+        ttk.Label(project_card, text=_tr('只读检测；写入前关闭工程'),
+                  style='Muted.TLabel').grid(row=2, column=3, columnspan=2, sticky='w', pady=(6, 0))
+        self._render_keil_windows()
 
         workspace = ttk.Frame(outer, style='App.TFrame')
         workspace.grid(row=1, column=0, sticky='nsew')
@@ -10222,6 +10253,10 @@ class KeilPortGUI:
             return
         _LOG_SINK = None
         _PROGRESS_SINK = None
+        pending = getattr(self, '_keil_scan_after', None)
+        if pending is not None:
+            self.root.after_cancel(pending)
+            self._keil_scan_after = None
         self.root.destroy()
 
     def _background_call(self, function, *args, **kwargs):
@@ -10754,6 +10789,111 @@ class KeilPortGUI:
         ttk.Button(frame, text=_tr('关闭'), command=win.destroy).pack(anchor='e', pady=(14, 0))
         win.grab_set()
 
+    def _project_edited(self, *_):
+        self._project_revision += 1
+
+    def _render_keil_windows(self):
+        labels = []
+        selected = -1
+        current = os.path.normcase(os.path.abspath(self.project_var.get())) if self.project_var.get() else ''
+        for index, window in enumerate(self._keil_windows):
+            identity = 'PID %d / HWND %X' % (window.pid, window.hwnd)
+            name = window.project.name if window.project else window.title
+            location = str(window.project) if window.project else _tr('路径未识别，请手动选择')
+            labels.append('%s | %s | %s' % (name, identity, location))
+            if window.project and os.path.normcase(os.path.abspath(window.project)) == current:
+                if selected < 0 or (window.pid, window.hwnd) == self._selected_keil_window:
+                    selected = index
+        self.keil_window_combo.configure(values=labels, state='readonly' if labels and not self._keil_scan_running else 'disabled')
+        if selected >= 0:
+            self.keil_window_combo.current(selected)
+            self.keil_window_combo.selection_clear()
+            self.keil_window_combo.xview_moveto(0)
+        else:
+            self.keil_window_var.set(_tr('请选择 Keil 窗口') if labels else
+                                     _tr('检测中…') if self._keil_scan_running else
+                                     _tr('未检测到 Keil 窗口'))
+        self.keil_refresh_button.configure(state='disabled' if self._keil_scan_running else 'normal')
+
+    def refresh_keil_windows(self, selected_window=None):
+        if self._keil_scan_running:
+            return
+        pending = self._keil_scan_after
+        if pending is not None:
+            self.root.after_cancel(pending)
+        self._keil_scan_after = None
+        self._keil_scan_running = True
+        revision = self._project_revision
+        events = queue.Queue()
+        deadline = time.monotonic() + 8.0
+        gc.collect()  # Finalize any abandoned Tk widgets on their owning thread.
+        # No Tk objects or GUI closures are passed into the worker.
+        def work():
+            try:
+                events.put((discover_keil_windows(), None))
+            except Exception as error:
+                events.put(([], str(error)))
+        self._render_keil_windows()
+        threading.Thread(target=work, name='KPS-Keil-window-scan', daemon=True).start()
+
+        def poll():
+            self._keil_scan_after = None
+            try:
+                windows, error = events.get_nowait()
+            except queue.Empty:
+                if time.monotonic() < deadline:
+                    self._keil_scan_after = self.root.after(50, poll)
+                    return
+                windows, error = [], 'Timed out; use manual selection (network path or access restrictions).'
+            self._keil_scan_running = False
+            self._keil_windows = windows
+            self._render_keil_windows()
+            if error:
+                self.keil_window_var.set(_tr('检测失败，请手动选择'))
+                self.append_log('Keil window detection: ' + error)
+                return
+            # A slow scan must never replace an explicit path, preset or user choice.
+            if (revision != self._project_revision or
+                    getattr(self, '_operation_busy', False) or self.root.grab_current() or
+                    (getattr(self, 'git_panel', None) and self.git_panel.busy)):
+                return
+            if selected_window is not None:
+                chosen = next((w for w in windows if (w.pid, w.hwnd) == selected_window), None)
+                if chosen is not None and chosen.project:
+                    self._selected_keil_window = selected_window
+                    self.project_var.set(str(chosen.project))
+                    self._project_changed()
+                else:
+                    self.status_var.set(_tr('路径未识别，请手动选择'))
+                return
+            if self.project_var.get().strip():
+                return
+            if len(windows) == 1 and windows[0].project:
+                self._selected_keil_window = (windows[0].pid, windows[0].hwnd)
+                self.project_var.set(str(windows[0].project))
+                self._project_changed()
+            elif not windows:
+                hits = _find_projects(Path.cwd())
+                if len(hits) == 1:
+                    self.project_var.set(str(hits[0].resolve()))
+                    self._project_changed()
+        self._keil_scan_after = self.root.after(50, poll)
+
+    def choose_keil_window(self, _event=None):
+        if (getattr(self, '_operation_busy', False) or
+                (getattr(self, 'git_panel', None) and self.git_panel.busy)):
+            self._render_keil_windows()
+            return
+        index = self.keil_window_combo.current()
+        if index < 0 or index >= len(self._keil_windows):
+            return
+        window = self._keil_windows[index]
+        if not window.project:
+            self.status_var.set(_tr('路径未识别，请手动选择'))
+            return
+        # Keil may have switched projects since the list was populated.
+        self.refresh_keil_windows(selected_window=(window.pid, window.hwnd))
+
     def browse_project(self):
         p = filedialog.askopenfilename(title=_tr('选择 Keil 工程'),
                                        filetypes=[(_tr('Keil 工程'), '*.uvprojx *.uvproj'), (_tr('全部文件'), '*.*')])
@@ -10798,6 +10938,16 @@ class KeilPortGUI:
         try:
             p = Path(self.project_var.get().strip().strip('"')).expanduser()
             proj = KeilProject(p)
+            identity = os.path.normcase(str(proj.path.resolve()))
+            if self._loaded_project is not None and self._loaded_project != identity:
+                # Never carry selected files or a previous project's scan root into another window.
+                self.target_var.set(_tr('全部 Target'))
+                self.scan_var.set(str(proj.dir))
+                self._pending_preset_selections = {}
+                for widget in vars(self).values():
+                    if isinstance(widget, CheckTree):
+                        widget.clear()
+            self._loaded_project = identity
             target_names = [name for name in proj.target_names(True) if name]
             self.target_combo.configure(values=[_tr('全部 Target')] + target_names)
             if self.target_var.get() not in [_tr('全部 Target')] + target_names:
@@ -10809,6 +10959,7 @@ class KeilPortGUI:
             if not self.sdk_var.get():
                 self.sdk_var.set(str(default_sdk_dir(proj)))
             self.status_var.set(_tr('工程：%s；芯片：%s') % (proj.path.name, proj.device() or _tr('未识别')))
+            self._render_keil_windows()
         except Exception as e:
             self.status_var.set(str(e))
 

@@ -1,5 +1,13 @@
 # Toolbar and Git test report
 
+## 2026-10-26 / dev3 open Keil selection
+
+- All 34 local regression scripts passed, including 19 new cases in `test_keil_windows.py`.
+- Read-only checks against two actual Keil windows recognized full paths, loaded their Targets on selection, and left project SHA-256 hashes unchanged. User projects were not saved, compiled or closed.
+- Coverage includes single/multiple windows, duplicate names/windows, Unicode/spaces/UNC paths, stale windows, missing files, errors/timeouts, manual-selection protection, language switching and background responsiveness.
+- Initial layout regression caught reduced checklist space. Compact project controls and top spacing restored the existing visibility thresholds at 980×650, 1180×800 and 125%/150% scaling without relaxing tests.
+- These are source/Tk callback and live-window checks, not new hardware, USB-power or clean-Windows acceptance. Packaged EXE acceptance is a separate step.
+
 ## 2026-09-22 / RC4 pre-release software regression
 
 All 19 `test_*.py` scripts passed, without timeouts or detected unsafe Tk finalization.

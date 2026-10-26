@@ -20,7 +20,7 @@ shows the number of enabled features.
 
 ## Workflow
 
-1. Choose a `.uvprojx` / `.uvproj` and the intended Target. Close that project in Keil first.
+1. Confirm a `.uvprojx` / `.uvproj` and its Target. Startup can locate an open Keil project automatically (below); close that project in Keil before writing.
 2. Choose the middleware source repository. Component migration makes a private
    project copy rather than changing the shared library.
 3. Open a component page, enable it, and select its source or prepare it automatically.
@@ -35,6 +35,19 @@ The general project-files page adds references to existing files; it is **not a
 source-copy operation**. Copy ordinary shared C/H/library files into the project
 before scanning if they must be isolated. Display, network, Flash, SD and USB
 drivers must still match the actual wiring and clocks.
+
+## Choose an open Keil project
+
+- On Windows, a read-only background scan runs at startup. Exactly one Keil window with a recognized full project path is selected automatically.
+- For multiple windows, use the **Keil windows** dropdown. PID, window handle and full path distinguish even projects with identical names; the first window is not arbitrarily selected.
+- Use **Refresh windows** after opening/closing Keil or switching projects there. Selecting an entry rechecks its current project instead of trusting a stale caption.
+- An explicit command-line project or a manual choice is never replaced by the background result. Refreshing also preserves an existing selection.
+- Switching projects resets Target, scan directory and component file previews/selections. Scan/prepare again so the previous project's files cannot carry over.
+- If the caption lacks a full path, the file is missing, access is restricted, or the workspace format is unsupported, use **Choose project**. Only `.uvprojx` / `.uvproj` are recognized. MRU records and process launch arguments are not used to guess the current project.
+- With no Keil window, the existing fallback selects a sole project in the current working directory.
+
+**Detection does not control Keil, save, close or reload anything.** Save and close the project in Keil before writing, then reopen it afterwards to avoid overwrites from stale in-memory project data. The selected path remains after Keil closes.
+Use the updated source or a newly packaged version containing this feature; existing EXEs do not gain it automatically.
 
 ## Selection behavior
 

@@ -1,11 +1,13 @@
 # Keil Port Studio
 
-[简体中文](README.md) · **2.3.0-dev2 / project adaptation prerelease**
+[简体中文](README.md) · **2.3.0-dev3 / project adaptation prerelease**
 
-[Download the complete Windows package](https://github.com/embedded-craft-dong/keil-port-studio/releases/download/v2.3.0-dev2/KeilPortStudio-Windows-x64.zip) · [Release notes and source archive](https://github.com/embedded-craft-dong/keil-port-studio/releases/tag/v2.3.0-dev2)
+[Download the complete Windows package](https://github.com/embedded-craft-dong/keil-port-studio/releases/download/v2.3.0-dev3/KeilPortStudio-Windows-x64.zip) · [Release notes and source archive](https://github.com/embedded-craft-dong/keil-port-studio/releases/tag/v2.3.0-dev3)
+
+New: [open Keil project detection](docs/GUI.en.md). One recognized window is selected automatically; multiple windows appear in a dropdown, with refresh and manual selection retained. Detection is read-only; close the project in Keil before writing.
 
 Current source adds a read-only [project health check](docs/DOCTOR.en.md) and the initial
-[SPL RTOS/component adapters](docs/SPL.en.md). `2.3.0-dev2` provides source and Windows packages; dev1 and RC6 remain available for rollback.
+[SPL RTOS/component adapters](docs/SPL.en.md). `2.3.0-dev3` provides source and Windows packages; dev2, dev1 and RC6 remain available for rollback.
 Also see [CubeMX regeneration protection, isolation and recovery](docs/CUBEMX.en.md).
 New: [reference removal and device driver generation](docs/DRIVERS.en.md), with software I2C,
 blocking hardware and DMA-completion adapters. New drivers have host protocol/compile checks,
@@ -51,7 +53,7 @@ is not a completed hardware driver.
 - [Git workflow and installation](docs/GIT.en.md)
 - [STM32 SPL: prerequisites, task entry points and tested scope](docs/SPL.en.md)
 - [Project health: file references and candidate pin conflicts](docs/DOCTOR.en.md)
-- [RC6 changes and known limitations](docs/RELEASE-NOTES-2.2.0-rc6.md)
+- [2.3.0-dev3 changes and known limitations](docs/RELEASE-NOTES-2.3.0-dev3.md)
 
 ## Important limitations
 
