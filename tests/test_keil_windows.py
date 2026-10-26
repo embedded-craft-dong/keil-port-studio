@@ -141,7 +141,7 @@ class WindowGuiTests(unittest.TestCase):
         app.target_var.set('Debug')
         self.choose(1)
         self.assertEqual(app.project_var.get(), str(self.projects[1]))
-        self.assertEqual(app.scan_var.get(), str(self.projects[1].parent))
+        self.assertTrue(Path(app.scan_var.get()).samefile(self.projects[1].parent))
         self.assertEqual(app.add_tree.file_count(), 0)
         self.assertEqual(app._pending_preset_selections, {})
         self.assertEqual(app.target_var.get(), '全部 Target')
@@ -159,7 +159,7 @@ class WindowGuiTests(unittest.TestCase):
         self.find.return_value = [self.projects[0]]
         app = self.launch()
         self.wait_scan()
-        self.assertEqual(app.project_var.get(), str(self.projects[0]))
+        self.assertTrue(Path(app.project_var.get()).samefile(self.projects[0]))
         self.assertEqual(str(app.keil_window_combo.cget('state')), 'disabled')
 
     def test_unknown_window_does_not_guess_cwd_project(self):
